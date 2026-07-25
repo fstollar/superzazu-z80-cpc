@@ -13,3 +13,5 @@ jobs:
       run: make
     - name: testing
       run: ./z80_tests
+    - name: Verify CPC timing table
+      run: python3 tools/verify_cpc_timing.py
