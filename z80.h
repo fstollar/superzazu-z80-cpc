@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include "z80_timing.h"
 
 typedef struct z80 z80;
 struct z80 {
@@ -14,6 +15,7 @@ struct z80 {
   void* userdata;
 
   unsigned long cyc; // cycle count (t-states)
+  const z80_timing_t* timing; // NULL until z80_init() sets z80_timing_generic
 
   uint16_t pc, sp, ix, iy; // special purpose registers
   uint16_t mem_ptr; // "wz" register
@@ -37,5 +39,6 @@ void z80_step(z80* const z);
 void z80_debug_output(z80* const z);
 void z80_gen_nmi(z80* const z);
 void z80_gen_int(z80* const z, uint8_t data);
+void z80_set_timing(z80* const z, const z80_timing_t* timing);
 
 #endif // Z80_Z80_H_

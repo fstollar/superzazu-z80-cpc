@@ -1,44 +1,5 @@
 #include "z80.h"
-
-// MARK: timings
-static const uint8_t cyc_00[256] = {4, 10, 7, 6, 4, 4, 7, 4, 4, 11, 7, 6, 4, 4,
-    7, 4, 8, 10, 7, 6, 4, 4, 7, 4, 12, 11, 7, 6, 4, 4, 7, 4, 7, 10, 16, 6, 4, 4,
-    7, 4, 7, 11, 16, 6, 4, 4, 7, 4, 7, 10, 13, 6, 11, 11, 10, 4, 7, 11, 13, 6,
-    4, 4, 7, 4, 4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4,
-    4, 7, 4, 4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4, 4,
-    7, 4, 7, 7, 7, 7, 7, 7, 4, 7, 4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4, 4, 7,
-    4, 4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4, 4, 7, 4,
-    4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4, 4, 7, 4, 4,
-    4, 4, 4, 4, 4, 7, 4, 5, 10, 10, 10, 10, 11, 7, 11, 5, 10, 10, 0, 10, 17, 7,
-    11, 5, 10, 10, 11, 10, 11, 7, 11, 5, 4, 10, 11, 10, 0, 7, 11, 5, 10, 10, 19,
-    10, 11, 7, 11, 5, 4, 10, 4, 10, 0, 7, 11, 5, 10, 10, 4, 10, 11, 7, 11, 5, 6,
-    10, 4, 10, 0, 7, 11};
-
-static const uint8_t cyc_ed[256] = {8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 12,
-    12, 15, 20, 8, 14, 8, 9, 12, 12, 15, 20, 8, 14, 8, 9, 12, 12, 15, 20, 8, 14,
-    8, 9, 12, 12, 15, 20, 8, 14, 8, 9, 12, 12, 15, 20, 8, 14, 8, 18, 12, 12, 15,
-    20, 8, 14, 8, 18, 12, 12, 15, 20, 8, 14, 8, 8, 12, 12, 15, 20, 8, 14, 8, 8,
-    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-    8, 8, 8, 8, 8, 8, 8, 16, 16, 16, 16, 8, 8, 8, 8, 16, 16, 16, 16, 8, 8, 8, 8,
-    16, 16, 16, 16, 8, 8, 8, 8, 16, 16, 16, 16, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-    8, 8, 8, 8, 8, 8, 8};
-
-static const uint8_t cyc_ddfd[256] = {4, 4, 4, 4, 4, 4, 4, 4, 4, 15, 4, 4, 4, 4,
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 15, 4, 4, 4, 4, 4, 4, 4, 14, 20, 10, 8, 8,
-    11, 4, 4, 15, 20, 10, 8, 8, 11, 4, 4, 4, 4, 4, 23, 23, 19, 4, 4, 15, 4, 4,
-    4, 4, 4, 4, 4, 4, 4, 4, 8, 8, 19, 4, 4, 4, 4, 4, 8, 8, 19, 4, 4, 4, 4, 4, 8,
-    8, 19, 4, 4, 4, 4, 4, 8, 8, 19, 4, 8, 8, 8, 8, 8, 8, 19, 8, 8, 8, 8, 8, 8,
-    8, 19, 8, 19, 19, 19, 19, 19, 19, 4, 19, 4, 4, 4, 4, 8, 8, 19, 4, 4, 4, 4,
-    4, 8, 8, 19, 4, 4, 4, 4, 4, 8, 8, 19, 4, 4, 4, 4, 4, 8, 8, 19, 4, 4, 4, 4,
-    4, 8, 8, 19, 4, 4, 4, 4, 4, 8, 8, 19, 4, 4, 4, 4, 4, 8, 8, 19, 4, 4, 4, 4,
-    4, 8, 8, 19, 4, 4, 4, 4, 4, 8, 8, 19, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 0,
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 14, 4, 23, 4,
-    15, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 10, 4, 4, 4, 4,
-    4, 4};
+#include "z80_timing.h"
 
 // MARK: helpers
 
@@ -191,7 +152,7 @@ static inline void cond_call(z80* const z, bool condition) {
   const uint16_t addr = nextw(z);
   if (condition) {
     call(z, addr);
-    z->cyc += 7;
+    z->cyc += z->timing->cond_call_taken_extra;
   }
   z->mem_ptr = addr;
 }
@@ -206,7 +167,7 @@ static inline void ret(z80* const z) {
 static inline void cond_ret(z80* const z, bool condition) {
   if (condition) {
     ret(z);
-    z->cyc += 6;
+    z->cyc += z->timing->cond_ret_taken_extra;
   }
 }
 
@@ -219,7 +180,7 @@ static inline void cond_jr(z80* const z, bool condition) {
   const int8_t b = nextb(z);
   if (condition) {
     jr(z, b);
-    z->cyc += 5;
+    z->cyc += z->timing->cond_jr_taken_extra;
   }
 }
 
@@ -662,7 +623,7 @@ static inline void process_interrupts(z80* const z) {
     z->iff1 = 0;
     inc_r(z);
 
-    z->cyc += 11;
+    z->cyc += z->timing->nmi_ack;
     call(z, 0x66);
     return;
   }
@@ -676,17 +637,17 @@ static inline void process_interrupts(z80* const z) {
 
     switch (z->interrupt_mode) {
     case 0:
-      z->cyc += 11;
+      z->cyc += z->timing->int_ack_im0;
       exec_opcode(z, z->int_data);
       break;
 
     case 1:
-      z->cyc += 13;
+      z->cyc += z->timing->int_ack_im1;
       call(z, 0x38);
       break;
 
     case 2:
-      z->cyc += 19;
+      z->cyc += z->timing->int_ack_im2;
       call(z, rw(z, (z->i << 8) | z->int_data));
       break;
 
@@ -710,6 +671,7 @@ void z80_init(z80* const z) {
   z->userdata = NULL;
 
   z->cyc = 0;
+  z->timing = &z80_timing_generic;
 
   z->pc = 0;
   z->sp = 0xFFFF;
@@ -794,7 +756,7 @@ void z80_gen_int(z80* const z, uint8_t data) {
 
 // executes a non-prefixed opcode
 void exec_opcode(z80* const z, uint8_t opcode) {
-  z->cyc += cyc_00[opcode];
+  z->cyc += z->timing->cyc_00[opcode];
   inc_r(z);
 
   switch (opcode) {
@@ -1246,7 +1208,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
 
 // executes a DD/FD opcode (IZ = IX or IY)
 void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
-  z->cyc += cyc_ddfd[opcode];
+  z->cyc += z->timing->cyc_ddfd[opcode];
   inc_r(z);
 
 #define IZD displace(z, *iz, nextb(z))
@@ -1398,7 +1360,7 @@ void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
 
 // executes a CB opcode
 void exec_opcode_cb(z80* const z, uint8_t opcode) {
-  z->cyc += 8;
+  z->cyc += z->timing->cyc_cb[opcode];
   inc_r(z);
 
   // decoding instructions from http://z80.info/decoding.htm#cb
@@ -1442,15 +1404,10 @@ void exec_opcode_cb(z80* const z, uint8_t opcode) {
     if (z_ == 6) {
       z->yf = GET_BIT(5, z->mem_ptr >> 8);
       z->xf = GET_BIT(3, z->mem_ptr >> 8);
-      z->cyc += 4;
     }
   } break;
   case 2: *reg &= ~(1 << y_); break; // RES y, r[z]
   case 3: *reg |= 1 << y_; break; // SET y, r[z]
-  }
-
-  if ((x_ == 0 || x_ == 2 || x_ == 3) && z_ == 6) {
-    z->cyc += 7;
   }
 
   if (reg == &hl) {
@@ -1511,16 +1468,16 @@ void exec_opcode_dcb(z80* const z, uint8_t opcode, uint16_t addr) {
 
   if (x_ == 1) {
     // bit instructions take 20 cycles, others take 23
-    z->cyc += 20;
+    z->cyc += z->timing->ddfdcb_bit;
   } else {
     wb(z, addr, result);
-    z->cyc += 23;
+    z->cyc += z->timing->ddfdcb_other;
   }
 }
 
 // executes a ED opcode
 void exec_opcode_ed(z80* const z, uint8_t opcode) {
-  z->cyc += cyc_ed[opcode];
+  z->cyc += z->timing->cyc_ed[opcode];
   inc_r(z);
   switch (opcode) {
   case 0x47: z->i = z->a; break; // ld i,a
@@ -1562,7 +1519,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
 
     if (get_bc(z) != 0) {
       z->pc -= 2;
-      z->cyc += 5;
+      z->cyc += z->timing->block_repeat_extra;
       z->mem_ptr = z->pc + 1;
     }
   } break; // ldir
@@ -1573,7 +1530,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
 
     if (get_bc(z) != 0) {
       z->pc -= 2;
-      z->cyc += 5;
+      z->cyc += z->timing->block_repeat_extra;
       z->mem_ptr = z->pc + 1;
     }
   } break; // lddr
@@ -1584,7 +1541,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     cpi(z);
     if (get_bc(z) != 0 && !z->zf) {
       z->pc -= 2;
-      z->cyc += 5;
+      z->cyc += z->timing->block_repeat_extra;
       z->mem_ptr = z->pc + 1;
     } else {
       z->mem_ptr += 1;
@@ -1594,7 +1551,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     cpd(z);
     if (get_bc(z) != 0 && !z->zf) {
       z->pc -= 2;
-      z->cyc += 5;
+      z->cyc += z->timing->block_repeat_extra;
     } else {
       z->mem_ptr += 1;
     }
@@ -1620,7 +1577,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     ini(z);
     if (z->b > 0) {
       z->pc -= 2;
-      z->cyc += 5;
+      z->cyc += z->timing->block_repeat_extra;
     }
     break; // inir
   case 0xAA: ind(z); break; // ind
@@ -1628,7 +1585,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     ind(z);
     if (z->b > 0) {
       z->pc -= 2;
-      z->cyc += 5;
+      z->cyc += z->timing->block_repeat_extra;
     }
     break; // indr
 
@@ -1649,7 +1606,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     outi(z);
     if (z->b > 0) {
       z->pc -= 2;
-      z->cyc += 5;
+      z->cyc += z->timing->block_repeat_extra;
     }
   } break; // otir
   case 0xAB: outd(z); break; // outd
@@ -1771,3 +1728,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
 }
 
 #undef GET_BIT
+
+void z80_set_timing(z80* const z, const z80_timing_t* timing) {
+  z->timing = timing;
+}
