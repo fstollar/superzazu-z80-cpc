@@ -2,3 +2,5 @@
 *.o
 z80_tests
 TODO
+__pycache__/
+*.pyc

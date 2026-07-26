@@ -10,7 +10,7 @@
 // another platform.
 typedef struct {
   uint8_t cyc_00[256];   // base opcode table
-  uint8_t cyc_cb[256];   // CB-prefixed opcode table (full cost, incl. base 8)
+  uint8_t cyc_cb[256];   // CB-prefixed opcode table (full per-opcode cost)
   uint8_t cyc_ed[256];   // ED-prefixed opcode table
   uint8_t cyc_ddfd[256]; // DD/FD-prefixed opcode table (IX shown; IY identical)
 
