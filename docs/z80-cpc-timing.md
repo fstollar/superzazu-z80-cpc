@@ -1,26 +1,32 @@
 <!-- Mirrored from the CPC Plus raycaster project's
-docs/z80/reference/z80-cpc-timing.md as of 2026-07-25. That repo is the
-canonical source if this copy ever needs updating. -->
+docs/z80/reference/z80-cpc-timing.md as of 2026-07-26 (updated: all 12
+original cpctech/grimware conflicts now resolved via RASM as a third
+source). That repo is the canonical source if this copy ever needs
+updating. -->
 
 # Z80 Instruction Timing on Amstrad CPC (NOPs = µs)
 
 Merged/canonical timing table for this project's cycle budgeting. Two
 independent published sources (cpctech.org.uk and grimware.org) were
-cross-checked; 12 rows disagreed. 10 of those 12 have since been resolved
-by working out the exact per-M-cycle bus-stretching model from real Z80
-M-cycle T-state structure — see
-`docs/reference/z80-timing/z80-mcycle-model.md` for the full derivation.
-The remaining 2 are marked **⚠[n]** with both values given in "Still
-unresolved" below — **verify empirically before relying on either value**
-for anything performance-critical on those two.
+cross-checked; 12 rows disagreed. 10 of those 12 were resolved by working
+out the exact per-M-cycle bus-stretching model from real Z80 M-cycle
+T-state structure; the remaining 2 stayed genuinely ambiguous from that
+model alone. A third independent CPC-specific source — the RASM
+assembler's own author-maintained timing annex — was cross-checked
+2026-07-26 and broke both remaining ties (**all 12 rows now resolved**),
+plus re-confirmed all 10 previously-resolved rows with no new
+disagreements. See `docs/reference/z80-timing/z80-mcycle-model.md` for the
+full derivation and the RASM tie-break reasoning.
 
 Raw sources, saved in full: `docs/reference/z80-timing/cpctech-instrtim.md`
 (basis for this table's rows), `docs/reference/z80-timing/grimware-z80-instruction-set.md`
 (cross-check source — more detailed per-instruction, e.g. opcode encoding,
 but its own author flags it "unfinished" and its Bit-test/Rotate-Shift/
-Input-Output tables are empty), and `docs/reference/z80-timing/z80-mcycle-model.md`
-(the resolution methodology, citing exact M-cycle T-state tables from a
-generic Z80 reference).
+Input-Output tables are empty), `docs/reference/z80-timing/rasm-nops.md`
+(third cross-check source, tie-breaker for the last 2 rows), and
+`docs/reference/z80-timing/z80-mcycle-model.md` (the resolution
+methodology, citing exact M-cycle T-state tables from a generic Z80
+reference).
 
 ## Why these numbers differ from a generic Z80 reference
 
@@ -93,7 +99,7 @@ satisfied/satisfied.
 | INC HIX / DEC HIX / INC LIX / DEC LIX | 2 |
 | LD HIX,n / LD LIX,n | 3 |
 | INC (IX+dd) / DEC (IX+dd) | 6 |
-| LD (IX+dd),nn ⚠[1] | 6 |
+| LD (IX+dd),nn | 6 |
 | LD r,HIX / LD r,LIX / LD HIX,r / LD LIX,r | 2 |
 | LD r,(IX+dd) / LD (IX+dd),r | 5 |
 | ADD A,HIX / ADC A,HIX / SUB HIX / SBC A,HIX | 2 |
@@ -126,8 +132,10 @@ satisfied/satisfied.
 | RETN / RETI | 4 |
 | DD / FD prefix | 1 (see note) |
 | ED "nop" (ED 00–ED 3F) | 2 |
-| CPI / INI / CPD / IND ⚠[2] | 5 |
-| CPIR / INIR / OTIR / CPDR / INDR / OTDR ⚠[2] | BC-1=0: 5, BC-1≠0: 6 (per iteration) |
+| CPI / CPD | 4 |
+| INI / IND | 5 |
+| CPIR / CPDR | BC-1=0: 4, BC-1≠0: 6 (per iteration) |
+| INIR / INDR / OTIR / OTDR | BC-1=0: 5, BC-1≠0: 6 (per iteration) |
 
 Notes:
 - The `DD`/`FD prefix` row (1 µs) applies when multiple `DD`/`FD` prefixes
@@ -144,26 +152,30 @@ Notes:
   write), `POP`'s are `4,4,3,3` (no such extra cycle needed before the
   first read).
 
-## Still unresolved
+## Resolved by third-source tie-break (RASM annex)
 
-Two rows have a genuine ambiguity in the M-cycle model itself (an
-internal-only cycle whose bus/non-bus status wasn't pinned down) — see
+Two rows had a genuine ambiguity in the M-cycle model itself (an
+internal-only cycle whose bus/non-bus status wasn't pinned down from that
+model alone). `docs/reference/z80-timing/rasm-nops.md` — a third
+independent CPC-specific source — broke both ties; see
 `docs/reference/z80-timing/z80-mcycle-model.md` for the full reasoning.
+All 12 originally-conflicting rows are now resolved.
 
-1. **`LD (IX+dd),nn`** (i.e. `LD (IX+d),n`): cpctech says **6 µs**;
-   grimware says **5 µs**. Model gives 6 µs *if* the disputed M-cycle is
-   bus activity (fetching immediate `n`), but the *agreed* (both sources,
-   5 µs) `LD r,(IX+dd)`/`LD (IX+dd),r` has the identical M-cycle shape with
-   a cycle that's plausibly pure-internal (index-address calculation, no
-   byte to fetch there) instead. Which reading applies to the `,n` variant
-   isn't settled here.
-2. **`CPI`/`CPD`** (and by extension `CPIR`/`CPDR`): cpctech groups these
-   with `INI`/`IND` at **5 µs**; grimware gives **4 µs**. Structurally
-   identical M-cycles to `LDI` (`4,4,3,5`), whose last cycle is a genuine
-   bus write and rounds to 5 µs total (matching both sources) — but `CPI`'s
-   last cycle is BC-decrement-and-compare with no write and no further
-   read, so it may be pure-internal and not get the same stretch. Leaning
-   cpctech (5 µs) on the `LDI` analogy, but not certain.
+1. **`LD (IX+dd),nn`** (i.e. `LD (IX+d),n`): cpctech said **6 µs**;
+   grimware said **5 µs**. **RASM confirms 6 µs** (cpctech's side) —
+   already reflected in the table above.
+2. **`CPI`/`CPD`** (and by extension `CPIR`/`CPDR`): cpctech grouped these
+   with `INI`/`IND` at **5 µs**; grimware gave **4 µs**. **RASM confirms
+   4 µs** (grimware's side) for `CPI`/`CPD` specifically — `INI`/`IND`
+   stay at the undisputed 5 µs. This also meant the table's old combined
+   `CPIR/INIR/OTIR/CPDR/INDR/OTDR` row was wrong for two of the six
+   mnemonics — now split into separate `CPIR`/`CPDR` (4 µs terminal) and
+   `INIR`/`INDR`/`OTIR`/`OTDR` (5 µs terminal) rows above.
+
+Neither value is yet oracle/hardware-measured — RASM is a strong
+independent cross-check (its author, roudoudou, writes CPC-hardware code
+professionally), not a substitute for empirical verification if either
+instruction ends up on a genuinely hot path.
 
 ## Other timings
 

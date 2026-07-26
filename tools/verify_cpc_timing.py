@@ -3,7 +3,7 @@
 docs/z80-cpc-timing.md's own markdown table, independently of the
 generator's opcode-decode logic. Fails loudly on any mismatch.
 
-Checks each of the doc's 85 table rows against the specific CPC_US
+Checks each of the doc's 87 table rows against the specific CPC_US
 key(s) that row's mnemonic(s) correspond to (DOC_ROW_TO_KEYS below),
 not just "does this number appear somewhere in CPC_US" -- a per-row
 mapping is the only way this catches a single mnemonic's value being
@@ -107,7 +107,7 @@ DOC_ROW_TO_KEYS = {
     'INC HIX / DEC HIX / INC LIX / DEC LIX': ['INC_HIX', 'DEC_HIX', 'INC_LIX', 'DEC_LIX'],
     'LD HIX,n / LD LIX,n': ['LD_HIX_N', 'LD_LIX_N'],
     'INC (IX+dd) / DEC (IX+dd)': ['INC_iIXd', 'DEC_iIXd'],
-    'LD (IX+dd),nn ⚠[1]': ['LD_iIXd_N'],
+    'LD (IX+dd),nn': ['LD_iIXd_N'],
     'LD r,HIX / LD r,LIX / LD HIX,r / LD LIX,r': ['LD_R_HLIX'],
     'LD r,(IX+dd) / LD (IX+dd),r': ['LD_R_iIXd', 'LD_iIXd_R'],
     'ADD A,HIX / ADC A,HIX / SUB HIX / SBC A,HIX': ['ALU_A_HIX'],
@@ -141,9 +141,10 @@ DOC_ROW_TO_KEYS = {
     'RETN / RETI': ['RETN_RETI'],
     'DD / FD prefix': ['DD_PREFIX', 'FD_PREFIX', 'DDFD_PASSTHROUGH'],
     'ED "nop" (ED 00–ED 3F)': ['ED_NOP'],
-    'CPI / INI / CPD / IND ⚠[2]': ['CPI_CPD', 'INI_IND'],
-    'CPIR / INIR / OTIR / CPDR / INDR / OTDR ⚠[2]': [
-        ('CPIR_CPDR', 'CPIR_CPDR_REPEAT_BONUS'),
+    'CPI / CPD': ['CPI_CPD'],
+    'INI / IND': ['INI_IND'],
+    'CPIR / CPDR': [('CPIR_CPDR', 'CPIR_CPDR_REPEAT_BONUS')],
+    'INIR / INDR / OTIR / OTDR': [
         ('INIR_INDR', 'INIR_INDR_REPEAT_BONUS'),
         ('OTIR_OTDR', 'OTIR_OTDR_REPEAT_BONUS'),
     ],
@@ -186,8 +187,8 @@ def check_row(mnemonic, value_cell, errors):
 
 def main():
     doc_rows = parse_doc_table('docs/z80-cpc-timing.md')
-    if len(doc_rows) != 85:
-        print(f'FAIL: parsed {len(doc_rows)} doc rows, expected exactly 85 '
+    if len(doc_rows) != 87:
+        print(f'FAIL: parsed {len(doc_rows)} doc rows, expected exactly 87 '
               '-- markdown table format may have changed, update DOC_ROW_TO_KEYS',
               file=sys.stderr)
         sys.exit(1)
@@ -207,7 +208,7 @@ def main():
             errors.append(f'{field}: doc prose says {expected} but CPC_US resolves to {val}')
 
     unresolved = {k: resolve(k) for k in CPC_US if resolve(k)[1]}
-    expected_unresolved = {'CPI_CPD', 'INI_IND', 'LD_iIXd_N', 'NMI_ACK', 'INT_ACK_IM0'}
+    expected_unresolved = {'NMI_ACK', 'INT_ACK_IM0'}
     if set(unresolved) != expected_unresolved:
         errors.append(f'UNRESOLVED set changed: {sorted(unresolved)} != '
                        f'{sorted(expected_unresolved)} -- update this script\'s '

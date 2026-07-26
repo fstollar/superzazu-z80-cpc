@@ -1541,7 +1541,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     cpi(z);
     if (get_bc(z) != 0 && !z->zf) {
       z->pc -= 2;
-      z->cyc += z->timing->block_repeat_extra;
+      z->cyc += z->timing->cpir_cpdr_repeat_extra;
       z->mem_ptr = z->pc + 1;
     } else {
       z->mem_ptr += 1;
@@ -1551,7 +1551,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     cpd(z);
     if (get_bc(z) != 0 && !z->zf) {
       z->pc -= 2;
-      z->cyc += z->timing->block_repeat_extra;
+      z->cyc += z->timing->cpir_cpdr_repeat_extra;
     } else {
       z->mem_ptr += 1;
     }

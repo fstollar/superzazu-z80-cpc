@@ -21,8 +21,11 @@ typedef struct {
   uint8_t cond_ret_taken_extra;  // RET cc: added when condition true
   uint8_t cond_jr_taken_extra;   // JR cc,d and DJNZ d: added when taken
 
-  uint8_t block_repeat_extra; // LDIR/LDDR/CPIR/CPDR/INIR/INDR/OTIR/OTDR:
-                               // added per non-final iteration
+  uint8_t block_repeat_extra;     // LDIR/LDDR/INIR/INDR/OTIR/OTDR:
+                                   // added per non-final iteration
+  uint8_t cpir_cpdr_repeat_extra; // CPIR/CPDR: added per non-final
+                                   // iteration (diverges from the other
+                                   // block-repeat ops on real CPC hardware)
 
   uint8_t nmi_ack;    // NMI acknowledge
   uint8_t int_ack_im0; // INT acknowledge, interrupt mode 0

@@ -174,20 +174,17 @@ CPC_US = {
     'RRD': 5, 'RLD': 5, 'ED_NOP': 2,
     'LDI': 5, 'LDD': 5, 'OUTI_OUTD': 5,
     'LDIR_LDDR': 5, 'LDIR_LDDR_REPEAT_BONUS': 1,
-    'CPIR_CPDR': 5, 'CPIR_CPDR_REPEAT_BONUS': 1,
+    'CPIR_CPDR': 4, 'CPIR_CPDR_REPEAT_BONUS': 2,
     'INIR_INDR': 5, 'INIR_INDR_REPEAT_BONUS': 1,
     'OTIR_OTDR': 5, 'OTIR_OTDR_REPEAT_BONUS': 1,
-    'CPI_CPD': ('UNRESOLVED', 5,
-        "doc's own ⚠[2]: cpctech says 5, grimware says 4 for CPI/CPD"),
-    'INI_IND': ('UNRESOLVED', 5,
-        "doc's own ⚠[2] group; not independently discussed in the doc's resolution notes"),
+    'CPI_CPD': 4,
+    'INI_IND': 5,
     'ADD_IX_RP': 4, 'LD_IX_NN': 4, 'LD_inn_IX': 6, 'LD_IX_inn': 6,
     'INC_IX': 3, 'DEC_IX': 3,
     'INC_HIX': 2, 'DEC_HIX': 2, 'INC_LIX': 2, 'DEC_LIX': 2,
     'LD_HIX_N': 3, 'LD_LIX_N': 3,
     'INC_iIXd': 6, 'DEC_iIXd': 6,
-    'LD_iIXd_N': ('UNRESOLVED', 6,
-        "doc's own ⚠[1]: cpctech says 6, grimware says 5"),
+    'LD_iIXd_N': 6,
     'LD_R_iIXd': 5, 'LD_iIXd_R': 5, 'LD_R_HLIX': 2,
     'ALU_A_HIX': 2, 'ALU_A_iIXd': 5,
     'POP_IX': 4, 'PUSH_IX': 5, 'EX_iSP_IX': 7, 'JP_iIX': 2, 'LD_SP_IX': 3,
@@ -233,6 +230,7 @@ def main():
         'cond_ret_taken_extra': resolve('RET_CC_T_BONUS'),
         'cond_jr_taken_extra': resolve('JR_CC_T_BONUS'),
         'block_repeat_extra': resolve('LDIR_LDDR_REPEAT_BONUS'),
+        'cpir_cpdr_repeat_extra': resolve('CPIR_CPDR_REPEAT_BONUS'),
         'nmi_ack': resolve('NMI_ACK'),
         'int_ack_im0': resolve('INT_ACK_IM0'),
         'int_ack_im1': resolve('INT_ACK_IM1'),
@@ -241,7 +239,11 @@ def main():
 
     assert resolve('JR_CC_T_BONUS')[0] == resolve('DJNZ_T_BONUS')[0], \
         'JR cc and DJNZ must share cond_jr_taken_extra'
-    for k in ('LDIR_LDDR_REPEAT_BONUS', 'CPIR_CPDR_REPEAT_BONUS',
+    # CPIR/CPDR's repeat bonus is its own field, not necessarily equal to
+    # the shared block_repeat_extra -- on real CPC hardware it diverges
+    # (verified via docs/z80-cpc-timing.md's RASM-resolved values), so it's
+    # deliberately excluded from this equality check.
+    for k in ('LDIR_LDDR_REPEAT_BONUS',
               'INIR_INDR_REPEAT_BONUS', 'OTIR_OTDR_REPEAT_BONUS'):
         assert resolve(k)[0] == scalars['block_repeat_extra'][0], \
             f'{k} must match shared block_repeat_extra'

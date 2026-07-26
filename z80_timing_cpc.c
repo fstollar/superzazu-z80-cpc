@@ -50,8 +50,8 @@ const z80_timing_t z80_timing_cpc = {
     4, 4, 4, 6, 2, 4, 2, 2, 4, 4, 4, 6, 2, 4, 2, 2,
     2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
     2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-    5, 5, 5, 5, 2, 2, 2, 2, 5, 5, 5, 5, 2, 2, 2, 2,
-    5, 5, 5, 5, 2, 2, 2, 2, 5, 5, 5, 5, 2, 2, 2, 2,
+    5, 4, 5, 5, 2, 2, 2, 2, 5, 4, 5, 5, 2, 2, 2, 2,
+    5, 4, 5, 5, 2, 2, 2, 2, 5, 4, 5, 5, 2, 2, 2, 2,
     2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
     2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
     2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
@@ -81,14 +81,10 @@ const z80_timing_t z80_timing_cpc = {
   .cond_ret_taken_extra = 2,
   .cond_jr_taken_extra = 1,
   .block_repeat_extra = 1,
+  .cpir_cpdr_repeat_extra = 2,
   .nmi_ack = 11,  // UNRESOLVED: no entry in z80-cpc-timing.md; generic-Z80 value used as placeholder
   .int_ack_im0 = 11,  // UNRESOLVED: doc: "depends on the instruction fetched", not a fixed value
   .int_ack_im1 = 5,
   .int_ack_im2 = 19,
 };
 
-  // UNRESOLVED cyc_ed[0xa1]: doc's own ⚠[2]: cpctech says 5, grimware says 4 for CPI/CPD
-  // UNRESOLVED cyc_ed[0xa2]: doc's own ⚠[2] group; not independently discussed in the doc's resolution notes
-  // UNRESOLVED cyc_ed[0xa9]: doc's own ⚠[2]: cpctech says 5, grimware says 4 for CPI/CPD
-  // UNRESOLVED cyc_ed[0xaa]: doc's own ⚠[2] group; not independently discussed in the doc's resolution notes
-  // UNRESOLVED cyc_ddfd[0x36]: doc's own ⚠[1]: cpctech says 6, grimware says 5
