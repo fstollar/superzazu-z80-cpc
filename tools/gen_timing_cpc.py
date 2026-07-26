@@ -192,8 +192,11 @@ CPC_US = {
     'DDFD_PASSTHROUGH': 1,
     'DDFDCB_BIT': 6, 'DDFDCB_OTHER': 7,
     'INT_ACK_IM1': 4, 'INT_ACK_IM2': 6, 'NMI_ACK': 4,
-    'INT_ACK_IM0': ('UNRESOLVED', 11,
-        'doc: "depends on the instruction fetched", not a fixed value'),
+    'INT_ACK_IM0': ('UNRESOLVED', 4,
+        'doc: "depends on the instruction fetched", not a fixed value -- '
+        '4us used as a more realistic placeholder (matches IM1/NMI\'s '
+        'CPCEC-confirmed shape for the common RST-style-vector case) '
+        'instead of the generic-Z80 fallback (11), pending a real value'),
 }
 
 def resolve(key):

@@ -83,7 +83,7 @@ const z80_timing_t z80_timing_cpc = {
   .block_repeat_extra = 1,
   .cpir_cpdr_repeat_extra = 2,
   .nmi_ack = 4,
-  .int_ack_im0 = 11,  // UNRESOLVED: doc: "depends on the instruction fetched", not a fixed value
+  .int_ack_im0 = 4,  // UNRESOLVED: doc: "depends on the instruction fetched", not a fixed value -- 4us used as a more realistic placeholder (matches IM1/NMI's CPCEC-confirmed shape for the common RST-style-vector case) instead of the generic-Z80 fallback (11), pending a real value
   .int_ack_im1 = 4,
   .int_ack_im2 = 6,
 };
