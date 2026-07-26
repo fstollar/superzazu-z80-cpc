@@ -523,7 +523,7 @@ static inline void cpd(z80* const z) {
 }
 
 static void in_r_c(z80* const z, uint8_t* r) {
-  *r = z->port_in(z, z->c);
+  *r = z->port_in(z, get_bc(z));
   z->zf = *r == 0;
   z->sf = *r >> 7;
   z->pf = parity(*r);
@@ -532,7 +532,7 @@ static void in_r_c(z80* const z, uint8_t* r) {
 }
 
 static void ini(z80* const z) {
-  uint8_t val = z->port_in(z, z->c);
+  uint8_t val = z->port_in(z, get_bc(z));
   wb(z, get_hl(z), val);
   set_hl(z, get_hl(z) + 1);
   z->b -= 1;
@@ -548,7 +548,7 @@ static void ind(z80* const z) {
 }
 
 static void outi(z80* const z) {
-  z->port_out(z, z->c, rb(z, get_hl(z)));
+  z->port_out(z, get_bc(z), rb(z, get_hl(z)));
   set_hl(z, get_hl(z) + 1);
   z->b -= 1;
   z->zf = z->b == 0;
@@ -1157,15 +1157,19 @@ void exec_opcode(z80* const z, uint8_t opcode) {
   } break; // pop af
 
   case 0xDB: {
+    // hardware quirk: A is placed on the upper 8 address lines for this
+    // instruction, not B (as it is for the ED-prefixed "in r,(c)" form).
     const uint8_t port = nextb(z);
     const uint8_t a = z->a;
-    z->a = z->port_in(z, port);
+    z->a = z->port_in(z, (uint16_t)(a << 8) | port);
     z->mem_ptr = (a << 8) | (z->a + 1);
   } break; // in a,(n)
 
   case 0xD3: {
+    // same quirk as above: A supplies both the upper address byte and the
+    // data byte for this instruction.
     const uint8_t port = nextb(z);
-    z->port_out(z, port, z->a);
+    z->port_out(z, (uint16_t)(z->a << 8) | port, z->a);
     z->mem_ptr = (port + 1) | (z->a << 8);
   } break; // out (n), a
 
@@ -1589,15 +1593,15 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     }
     break; // indr
 
-  case 0x41: z->port_out(z, z->c, z->b); break; // out (c), b
-  case 0x49: z->port_out(z, z->c, z->c); break; // out (c), c
-  case 0x51: z->port_out(z, z->c, z->d); break; // out (c), d
-  case 0x59: z->port_out(z, z->c, z->e); break; // out (c), e
-  case 0x61: z->port_out(z, z->c, z->h); break; // out (c), h
-  case 0x69: z->port_out(z, z->c, z->l); break; // out (c), l
-  case 0x71: z->port_out(z, z->c, 0); break; // out (c), 0
+  case 0x41: z->port_out(z, get_bc(z), z->b); break; // out (c), b
+  case 0x49: z->port_out(z, get_bc(z), z->c); break; // out (c), c
+  case 0x51: z->port_out(z, get_bc(z), z->d); break; // out (c), d
+  case 0x59: z->port_out(z, get_bc(z), z->e); break; // out (c), e
+  case 0x61: z->port_out(z, get_bc(z), z->h); break; // out (c), h
+  case 0x69: z->port_out(z, get_bc(z), z->l); break; // out (c), l
+  case 0x71: z->port_out(z, get_bc(z), 0); break; // out (c), 0
   case 0x79:
-    z->port_out(z, z->c, z->a);
+    z->port_out(z, get_bc(z), z->a);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), a
 
