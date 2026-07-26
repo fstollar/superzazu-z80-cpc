@@ -23,6 +23,8 @@ published numbers via a CPCEC cross-check), is now independently
 confirmed (see
 `docs/z80-cpc-timing.md`'s resolution notes).
 
+This fork also changed `port_in`/`port_out` to receive the real 16-bit port address (computed correctly for both the `IN r,(C)`/`OUT (C),r` and `IN A,(n)`/`OUT (n),A` forms) instead of upstream's low-byte-only signature, since CPC I/O device decoding needs the high byte too.
+
 Regenerate `z80_timing_cpc.c` after editing `docs/z80-cpc-timing.md` or
 `tools/gen_timing_cpc.py` with `python3 tools/gen_timing_cpc.py`, then
 `python3 tools/verify_cpc_timing.py` before committing.
