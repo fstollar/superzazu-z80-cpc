@@ -1,4 +1,4 @@
-# z80
+# Z80 emulator
 
 ## CPC timing fork
 
