@@ -1,8 +1,9 @@
 <!-- Mirrored from the CPC Plus raycaster project's
 docs/z80/reference/z80-cpc-timing.md as of 2026-07-26 (updated: all 12
 original cpctech/grimware conflicts now resolved via RASM as a third
-source). That repo is the canonical source if this copy ever needs
-updating. -->
+source; interrupt-acknowledge IM1/IM2/NMI figures corrected via CPCEC
+cross-check, cpctech's own published numbers for those were wrong). That
+repo is the canonical source if this copy ever needs updating. -->
 
 # Z80 Instruction Timing on Amstrad CPC (NOPs = µs)
 
@@ -13,20 +14,25 @@ out the exact per-M-cycle bus-stretching model from real Z80 M-cycle
 T-state structure; the remaining 2 stayed genuinely ambiguous from that
 model alone. A third independent CPC-specific source — the RASM
 assembler's own author-maintained timing annex — was cross-checked
-2026-07-26 and broke both remaining ties (**all 12 rows now resolved**),
-plus re-confirmed all 10 previously-resolved rows with no new
-disagreements. See `docs/reference/z80-timing/z80-mcycle-model.md` for the
-full derivation and the RASM tie-break reasoning.
+2026-07-26 and broke both remaining ties (**all 12 main-table rows
+resolved**), plus re-confirmed all 10 previously-resolved rows with no
+new disagreements. See `docs/z80/reference/z80-timing/z80-mcycle-model.md`
+for the full derivation and the RASM tie-break reasoning.
 
-Raw sources, saved in full: `docs/reference/z80-timing/cpctech-instrtim.md`
-(basis for this table's rows), `docs/reference/z80-timing/grimware-z80-instruction-set.md`
+Separately, the "Other timings" interrupt-acknowledge figures (below)
+came from cpctech alone and turned out to be wrong for IM 1/IM 2 — see
+that section for the CPCEC-sourced correction, cross-checked 2026-07-26.
+
+Raw sources, saved in full: `docs/z80/reference/z80-timing/cpctech-instrtim.md`
+(basis for this table's rows), `docs/z80/reference/z80-timing/grimware-z80-instruction-set.md`
 (cross-check source — more detailed per-instruction, e.g. opcode encoding,
 but its own author flags it "unfinished" and its Bit-test/Rotate-Shift/
-Input-Output tables are empty), `docs/reference/z80-timing/rasm-nops.md`
-(third cross-check source, tie-breaker for the last 2 rows), and
-`docs/reference/z80-timing/z80-mcycle-model.md` (the resolution
+Input-Output tables are empty), `docs/z80/reference/z80-timing/rasm-nops.md`
+(third cross-check source, tie-breaker for the last 2 main-table rows),
+`docs/z80/reference/z80-timing/z80-mcycle-model.md` (the resolution
 methodology, citing exact M-cycle T-state tables from a generic Z80
-reference).
+reference), and `docs/z80/reference/z80-timing/cpcec-interrupt-timing.md`
+(CPCEC emulator source, used for the interrupt-acknowledge correction).
 
 ## Why these numbers differ from a generic Z80 reference
 
@@ -179,7 +185,8 @@ instruction ends up on a genuinely hot path.
 
 ## Other timings
 
-- Interrupt-acknowledge → first instruction of the ISR: IM 0 depends on
-  the instruction fetched; IM 1: 5 µs; IM 2: 19 µs.
+- Interrupt-acknowledge → first instruction of the ISR: **IM 1: 4 µs;
+  IM 2: 6 µs; NMI: 4 µs** (corrected 2026-07-26 — see below). IM 0 still
+  depends on the instruction fetched; no fixed number.
 - 1 monitor scanline: 64 µs.
 - 1 PAL (50 Hz) monitor frame: 19968 µs (≈ 312 scanlines × 64 µs).

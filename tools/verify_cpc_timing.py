@@ -156,8 +156,9 @@ DOC_ROW_TO_KEYS = {
 # instruction-dependent; NMI ack isn't covered at all) and stay
 # UNRESOLVED, so they're intentionally not asserted here.
 PROSE_TIMINGS = {
-    'INT_ACK_IM1': 5,  # "IM 1: 5 us"
-    'INT_ACK_IM2': 19,  # "IM 2: 19 us"
+    'INT_ACK_IM1': 4,  # "IM 1: 4 us" (CPCEC-corrected, was cpctech's 5)
+    'INT_ACK_IM2': 6,  # "IM 2: 6 us" (CPCEC-corrected, was cpctech's 19)
+    'NMI_ACK': 4,  # "NMI: 4 us" (not in cpctech at all; CPCEC-sourced)
 }
 
 def check_row(mnemonic, value_cell, errors):
@@ -208,7 +209,7 @@ def main():
             errors.append(f'{field}: doc prose says {expected} but CPC_US resolves to {val}')
 
     unresolved = {k: resolve(k) for k in CPC_US if resolve(k)[1]}
-    expected_unresolved = {'NMI_ACK', 'INT_ACK_IM0'}
+    expected_unresolved = {'INT_ACK_IM0'}
     if set(unresolved) != expected_unresolved:
         errors.append(f'UNRESOLVED set changed: {sorted(unresolved)} != '
                        f'{sorted(expected_unresolved)} -- update this script\'s '

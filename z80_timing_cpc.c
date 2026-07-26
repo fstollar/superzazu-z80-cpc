@@ -82,9 +82,9 @@ const z80_timing_t z80_timing_cpc = {
   .cond_jr_taken_extra = 1,
   .block_repeat_extra = 1,
   .cpir_cpdr_repeat_extra = 2,
-  .nmi_ack = 11,  // UNRESOLVED: no entry in z80-cpc-timing.md; generic-Z80 value used as placeholder
+  .nmi_ack = 4,
   .int_ack_im0 = 11,  // UNRESOLVED: doc: "depends on the instruction fetched", not a fixed value
-  .int_ack_im1 = 5,
-  .int_ack_im2 = 19,
+  .int_ack_im1 = 4,
+  .int_ack_im2 = 6,
 };
 

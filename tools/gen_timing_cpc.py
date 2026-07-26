@@ -191,9 +191,7 @@ CPC_US = {
     'DDFDCB_PREFIX': 0,
     'DDFD_PASSTHROUGH': 1,
     'DDFDCB_BIT': 6, 'DDFDCB_OTHER': 7,
-    'INT_ACK_IM1': 5, 'INT_ACK_IM2': 19,
-    'NMI_ACK': ('UNRESOLVED', 11,
-        'no entry in z80-cpc-timing.md; generic-Z80 value used as placeholder'),
+    'INT_ACK_IM1': 4, 'INT_ACK_IM2': 6, 'NMI_ACK': 4,
     'INT_ACK_IM0': ('UNRESOLVED', 11,
         'doc: "depends on the instruction fetched", not a fixed value'),
 }

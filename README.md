@@ -11,13 +11,16 @@ Amstrad CPC's 1us-quantized bus timing instead of generic Z80 T-states
 Array stretches each bus-touching M-cycle to the next 1us boundary; see
 `docs/z80-cpc-timing.md` for the full table and its sourcing).
 
-Two scalar values (NMI acknowledge, and INT acknowledge in interrupt
-mode 0 -- see `tools/gen_timing_cpc.py`'s `CPC_US` dict) have no
-CPC-specific measurement available and fall back to the generic-Z80
-value, clearly tagged `UNRESOLVED` in `z80_timing_cpc.c` -- patches with
-real hardware measurements for those are welcome. Every other timing
-value, including the instructions that used to be ambiguous between two
-conflicting published sources, is now independently confirmed (see
+One scalar value (INT acknowledge in interrupt mode 0 -- see
+`tools/gen_timing_cpc.py`'s `CPC_US` dict) has no fixed CPC-specific
+measurement available -- its cost genuinely depends on the instruction
+the interrupting device puts on the bus -- and falls back to the
+generic-Z80 value, clearly tagged `UNRESOLVED` in `z80_timing_cpc.c`.
+Every other timing value, including the instructions that used to be
+ambiguous between two conflicting published sources, and the interrupt-
+acknowledge figures for NMI/IM1/IM2 (corrected against cpctech's own
+published numbers via a CPCEC cross-check), is now independently
+confirmed (see
 `docs/z80-cpc-timing.md`'s resolution notes).
 
 Regenerate `z80_timing_cpc.c` after editing `docs/z80-cpc-timing.md` or
