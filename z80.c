@@ -646,10 +646,17 @@ static inline void process_interrupts(z80* const z) {
       call(z, 0x38);
       break;
 
-    case 2:
+    case 2: {
       z->cyc += z->timing->int_ack_im2;
-      call(z, rw(z, (z->i << 8) | z->int_data));
+      // Real Z80 hardware quirk: the jump address's high byte is read from
+      // I<<8|(int_data+1), wrapping within the *same* page when int_data is
+      // 0xFF (I<<8|0x00), not from the next page like a plain 16-bit
+      // increment -- rw() can't be reused here since it does the latter.
+      const uint16_t addr_lo = (uint16_t)(z->i << 8) | z->int_data;
+      const uint16_t addr_hi = (uint16_t)(z->i << 8) | ((z->int_data + 1) & 0xFF);
+      call(z, (uint16_t)(rb(z, addr_hi) << 8) | rb(z, addr_lo));
       break;
+    }
 
     default:
       fprintf(stderr, "unsupported interrupt mode %d\n", z->interrupt_mode);
