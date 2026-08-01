@@ -44,7 +44,7 @@ static int load_file(const char* filename, uint16_t addr) {
   return 0;
 }
 
-static uint8_t in(z80* const z, uint8_t port) {
+static uint8_t in(z80* const z, uint16_t port) {
   uint8_t operation = z->c;
 
   // print a character stored in E
@@ -62,7 +62,7 @@ static uint8_t in(z80* const z, uint8_t port) {
   return 0xFF;
 }
 
-static void out(z80* const z, uint8_t port, uint8_t val) {
+static void out(z80* const z, uint16_t port, uint8_t val) {
   test_finished = 1;
 }
 
@@ -112,7 +112,7 @@ static int run_test(
   return cyc_expected != z->cyc;
 }
 
-int main(void) {
+int main(int argc, char** argv) {
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
     return 1;
@@ -122,10 +122,18 @@ int main(void) {
 
   // the following cycle counts have been retrieved from z80emu
   // (https://github.com/anotherlin/z80emu) for those exact roms
+  //
+  // An optional argv[1] runs just one of the three (they're independent,
+  // so a test runner can schedule them as separate parallel processes);
+  // with no argument, all three run sequentially as upstream's ./z80_tests did.
+  const char* which = argc > 1 ? argv[1] : NULL;
   int r = 0;
-  r += run_test(&cpu, "roms/prelim.com", 8721LU);
-  r += run_test(&cpu, "roms/zexdoc.cim", 46734978649LU);
-  r += run_test(&cpu, "roms/zexall.cim", 46734978649LU);
+  if (!which || strcmp(which, "prelim") == 0)
+    r += run_test(&cpu, "roms/prelim.com", 8721LU);
+  if (!which || strcmp(which, "zexdoc") == 0)
+    r += run_test(&cpu, "roms/zexdoc.cim", 46734978649LU);
+  if (!which || strcmp(which, "zexall") == 0)
+    r += run_test(&cpu, "roms/zexall.cim", 46734978649LU);
 
   free(memory);
   return r != 0;
