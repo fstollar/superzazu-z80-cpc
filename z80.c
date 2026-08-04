@@ -635,6 +635,9 @@ static inline void process_interrupts(z80* const z) {
     z->iff2 = 0;
     inc_r(z);
 
+    if (z->int_ack)
+      z->int_ack(z);
+
     switch (z->interrupt_mode) {
     case 0:
       z->cyc += z->timing->int_ack_im0;
@@ -675,6 +678,7 @@ void z80_init(z80* const z) {
   z->write_byte = NULL;
   z->port_in = NULL;
   z->port_out = NULL;
+  z->int_ack = NULL;
   z->userdata = NULL;
 
   z->cyc = 0;
@@ -736,6 +740,10 @@ void z80_step(z80* const z) {
     exec_opcode(z, opcode);
   }
 
+  process_interrupts(z);
+}
+
+void z80_check_interrupt(z80* const z) {
   process_interrupts(z);
 }
 

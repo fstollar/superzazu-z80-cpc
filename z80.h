@@ -12,6 +12,13 @@ struct z80 {
   void (*write_byte)(void*, uint16_t, uint8_t);
   uint8_t (*port_in)(z80*, uint16_t);
   void (*port_out)(z80*, uint16_t, uint8_t);
+  // Called from inside process_interrupts() the instant a maskable interrupt
+  // (not NMI) is actually accepted -- i.e. when the real Z80's /IORQ+/M1
+  // interrupt-acknowledge cycle would fire. NULL (the default) skips the
+  // call entirely; a CPC host wires this to let the Gate Array react to
+  // acceptance itself (its automatic bit-5 counter clear), separate from
+  // whatever device generated the interrupt via z80_gen_int().
+  void (*int_ack)(z80*);
   void* userdata;
 
   unsigned long cyc; // cycle count (t-states)
@@ -40,5 +47,13 @@ void z80_debug_output(z80* const z);
 void z80_gen_nmi(z80* const z);
 void z80_gen_int(z80* const z, uint8_t data);
 void z80_set_timing(z80* const z, const z80_timing_t* timing);
+
+// Services any pending NMI/interrupt immediately, without executing another
+// instruction first. z80_step() already calls this internally as its
+// trailing step, so callers only need this if they generate an interrupt
+// (z80_gen_int()/z80_gen_nmi()) *between* z80_step() calls and want it
+// serviced right away instead of waiting for the next z80_step() to reach
+// its own trailing call.
+void z80_check_interrupt(z80* const z);
 
 #endif // Z80_Z80_H_
