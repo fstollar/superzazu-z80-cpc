@@ -1708,7 +1708,10 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
   case 0x7C: z->a = subb(z, 0, z->a, 0); break; // neg
 
   case 0x46:
-  case 0x66: z->interrupt_mode = 0; break; // im 0
+  case 0x4E: // undocumented duplicate
+  case 0x66:
+  case 0x6E: // undocumented duplicate
+    z->interrupt_mode = 0; break; // im 0
   case 0x56:
   case 0x76: z->interrupt_mode = 1; break; // im 1
   case 0x5E:
