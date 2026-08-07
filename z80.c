@@ -1506,7 +1506,9 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     z->a = z->i;
     z->sf = z->a >> 7;
     z->zf = z->a == 0;
+    z->yf = GET_BIT(5, z->a);
     z->hf = 0;
+    z->xf = GET_BIT(3, z->a);
     z->nf = 0;
     z->pf = z->iff2;
     break; // ld a,i
@@ -1515,7 +1517,9 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     z->a = z->r;
     z->sf = z->a >> 7;
     z->zf = z->a == 0;
+    z->yf = GET_BIT(5, z->a);
     z->hf = 0;
+    z->xf = GET_BIT(3, z->a);
     z->nf = 0;
     z->pf = z->iff2;
     break; // ld a,r
