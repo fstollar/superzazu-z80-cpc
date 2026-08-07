@@ -5,3 +5,4 @@ TODO
 __pycache__/
 *.pyc
 CLAUDE.md
+*.code-workspace
