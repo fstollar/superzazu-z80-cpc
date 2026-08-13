@@ -165,7 +165,12 @@ CPC_US = {
     'DI': 1, 'EI': 1,
     'CALL_CC_NT': 3, 'CALL_CC_T_BONUS': 2,
     'PUSH_RP': 4, 'CALL_NN': 5,
-    'CB_PREFIX': 1, 'DD_PREFIX': 1, 'ED_PREFIX': 1, 'FD_PREFIX': 1,
+    # Bug 4.3: these must stay 0, matching z80_timing_generic.c's convention
+    # -- exec_opcode() (z80.c) already adds cyc_00[prefix_opcode] before
+    # dispatching to the prefixed table, and the prefixed table (cyc_cb/
+    # cyc_ddfd/cyc_ed below) already carries the doc's full per-instruction
+    # cost. A nonzero value here double-charges the prefix byte.
+    'CB_PREFIX': 0, 'DD_PREFIX': 0, 'ED_PREFIX': 0, 'FD_PREFIX': 0,
     'RST': 4,
     'ROT_R': 2, 'ROT_iHL': 4, 'BIT_R': 2, 'BIT_iHL': 3, 'RES_SET_iHL': 4,
     'IN_R_iC': 4, 'OUT_iC_R': 4, 'ADC_SBC_HL_RP': 4, 'LD_inn_RP': 6,

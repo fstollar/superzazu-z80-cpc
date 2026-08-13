@@ -139,7 +139,13 @@ DOC_ROW_TO_KEYS = {
     'OUTI / OUTD': ['OUTI_OUTD'],
     'LDIR / LDDR': [('LDIR_LDDR', 'LDIR_LDDR_REPEAT_BONUS')],
     'RETN / RETI': ['RETN_RETI'],
-    'DD / FD prefix': ['DD_PREFIX', 'FD_PREFIX', 'DDFD_PASSTHROUGH'],
+    # Bug 4.3: this doc row is the *stacked*-prefix passthrough cost (a
+    # redundant DD/FD before the real opcode), which is DDFD_PASSTHROUGH
+    # alone -- DD_PREFIX/FD_PREFIX are a different thing (the dispatch-entry
+    # byte z80.c's exec_opcode() charges before jumping to the prefixed
+    # table) and must stay 0 per the generic-table convention documented at
+    # their definition, or every prefixed instruction gets double-charged.
+    'DD / FD prefix': ['DDFD_PASSTHROUGH'],
     'ED "nop" (ED 00–ED 3F)': ['ED_NOP'],
     'CPI / CPD': ['CPI_CPD'],
     'INI / IND': ['INI_IND'],
