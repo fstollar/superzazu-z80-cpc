@@ -118,6 +118,7 @@ _IX_SPECIFIC = {
     0x36: 'LD_iIXd_N',
     0x46: 'LD_R_iIXd', 0x4E: 'LD_R_iIXd', 0x56: 'LD_R_iIXd',
     0x5E: 'LD_R_iIXd', 0x66: 'LD_R_iIXd', 0x6E: 'LD_R_iIXd',
+    0x7E: 'LD_R_iIXd',  # ld a,(ix+d) -- was missing: fell to PASSTHROUGH (1)
     0x70: 'LD_iIXd_R', 0x71: 'LD_iIXd_R', 0x72: 'LD_iIXd_R', 0x73: 'LD_iIXd_R',
     0x74: 'LD_iIXd_R', 0x75: 'LD_iIXd_R', 0x77: 'LD_iIXd_R',
     0x44: 'LD_R_HLIX', 0x45: 'LD_R_HLIX', 0x4C: 'LD_R_HLIX', 0x4D: 'LD_R_HLIX',
@@ -129,6 +130,11 @@ _IX_SPECIFIC = {
     0x7C: 'LD_R_HLIX', 0x7D: 'LD_R_HLIX',
     0x84: 'ALU_A_HIX', 0x8C: 'ALU_A_HIX', 0x94: 'ALU_A_HIX', 0x9C: 'ALU_A_HIX',
     0xA4: 'ALU_A_HIX', 0xAC: 'ALU_A_HIX', 0xB4: 'ALU_A_HIX', 0xBC: 'ALU_A_HIX',
+    # The IXL twins of the eight above: same cost (doc rows "ADD A,IXH ...
+    # / ADD A,IXL ..." and "AND IXH ... / AND IXL ..."). Were missing, so
+    # they fell to PASSTHROUGH and charged 1 us instead of 2.
+    0x85: 'ALU_A_HIX', 0x8D: 'ALU_A_HIX', 0x95: 'ALU_A_HIX', 0x9D: 'ALU_A_HIX',
+    0xA5: 'ALU_A_HIX', 0xAD: 'ALU_A_HIX', 0xB5: 'ALU_A_HIX', 0xBD: 'ALU_A_HIX',
     0x86: 'ALU_A_iIXd', 0x8E: 'ALU_A_iIXd', 0x96: 'ALU_A_iIXd', 0x9E: 'ALU_A_iIXd',
     0xA6: 'ALU_A_iIXd', 0xAE: 'ALU_A_iIXd', 0xB6: 'ALU_A_iIXd', 0xBE: 'ALU_A_iIXd',
     0xE1: 'POP_IX', 0xE5: 'PUSH_IX', 0xE3: 'EX_iSP_IX', 0xE9: 'JP_iIX',

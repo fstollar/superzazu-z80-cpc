@@ -192,6 +192,38 @@ def check_row(mnemonic, value_cell, errors):
                 errors.append(f'{mnemonic!r}: doc value {not_taken} but '
                                f'CPC_US[{entry!r}] resolves to {val}')
 
+def check_ddfd_decode_covers_core(errors):
+    """Every DD/FD opcode z80.c's exec_opcode_ddfd() handles ITSELF must
+    have its own decode entry in gen_timing_cpc.py's _IX_SPECIFIC.
+
+    A case the core executes without falling through to exec_opcode()
+    is charged ONLY cyc_ddfd[op]; if the decode map lacks it, the table
+    gives it DDFD_PASSTHROUGH (1 us) and the instruction runs at a
+    fraction of its CPC cost. The per-row value check above cannot see
+    this -- the value is right, the opcode is just never mapped to it.
+    Caught 2026-09-25: `ld a,(ix+d)` (0x7E) at 1 us instead of 5, and the
+    eight `ALU A,IXL` opcodes (0x85..0xBD step 8) at 1 instead of 2.
+
+    Core cases are read from the source, not listed here, so a new core
+    case without a map entry fails immediately.
+    """
+    import re
+    from gen_timing_cpc import _IX_SPECIFIC
+    src = open('z80.c').read()
+    # The definition, not the forward declaration near the top of z80.c.
+    start = re.search(r'void exec_opcode_ddfd\([^)]*\)\s*\{', src).start()
+    end = src.index('default: {', start)  # the passthrough to exec_opcode()
+    handled = {int(m, 16) for m in
+               re.findall(r'^\s*case 0x([0-9A-Fa-f]{2}):', src[start:end], re.M)}
+    missing = sorted(handled - set(_IX_SPECIFIC))
+    if missing:
+        errors.append('exec_opcode_ddfd() handles these DD/FD opcodes itself '
+                      'but _IX_SPECIFIC has no decode entry, so they are '
+                      'charged DDFD_PASSTHROUGH: '
+                      + ', '.join(f'{op:#04x}' for op in missing))
+    return len(handled)
+
+
 def main():
     doc_rows = parse_doc_table('docs/z80-cpc-timing.md')
     if len(doc_rows) != 87:
@@ -208,6 +240,8 @@ def main():
     if unmapped_keys:
         errors.append(f'DOC_ROW_TO_KEYS has entries for rows no longer in the doc: '
                        f'{sorted(unmapped_keys)}')
+
+    core_cases = check_ddfd_decode_covers_core(errors)
 
     for field, expected in PROSE_TIMINGS.items():
         val = resolve(field)[0]
@@ -230,6 +264,7 @@ def main():
     print(f'OK: {len(doc_rows)} doc rows independently cross-checked against '
           f'CPC_US per-mnemonic (not just value-set membership), '
           f'{len(PROSE_TIMINGS)} prose-timing values checked, '
+          f'{core_cases} core-handled DD/FD opcodes all decoded, '
           f'{len(unresolved)} UNRESOLVED entries match expected set')
 
 if __name__ == '__main__':
