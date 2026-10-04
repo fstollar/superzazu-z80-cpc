@@ -7,7 +7,7 @@
 #define GET_BIT(n, val) (((val) >> (n)) & 1)
 
 static inline uint8_t rb(z80* const z, uint16_t addr) {
-  // TODO 8.57: data -- every HL/BC/DE/IX+d/nn operand, stack pop,
+  // data -- every HL/BC/DE/IX+d/nn operand, stack pop,
   // ex (sp),hl and block-op byte.
   return z->read_byte(z->userdata, addr, Z80_READ_DATA);
 }
@@ -17,7 +17,7 @@ static inline void wb(z80* const z, uint16_t addr, uint8_t val) {
 }
 
 static inline uint16_t rw(z80* const z, uint16_t addr) {
-  // TODO 8.57: data -- 16-bit form of rb() above (stack pops, ld hl,(nn)).
+  // data -- 16-bit form of rb() above (stack pops, ld hl,(nn)).
   // Low byte first, as the Z80 bus does, sequenced explicitly: the old
   // single expression left the two hook calls unsequenced.
   const uint8_t lo = z->read_byte(z->userdata, addr, Z80_READ_DATA);
@@ -41,7 +41,7 @@ static inline uint16_t popw(z80* const z) {
 }
 
 static inline uint8_t nextb(z80* const z) {
-  // TODO 8.57: operand -- immediate/displacement bytes from the instruction
+  // operand -- immediate/displacement bytes from the instruction
   // stream (ld a,n, jp nn, jr d, the d of (ix+d)). The M1 prefix/opcode
   // fetches use fetchb() instead; the DD CB d op tail (d and final op,
   // which a real Z80 reads as non-M1 cycles) deliberately stays here.
@@ -49,7 +49,7 @@ static inline uint8_t nextb(z80* const z) {
 }
 
 static inline uint16_t nextw(z80* const z) {
-  // TODO 8.57: operand -- 16-bit form of nextb() (jp/call nn addresses,
+  // operand -- 16-bit form of nextb() (jp/call nn addresses,
   // ld rr,nn). Cannot reuse rw(), which tags data. Low byte first
   // (matching rw()'s bus order), sequenced explicitly.
   const uint16_t addr = z->pc;
@@ -59,7 +59,7 @@ static inline uint16_t nextw(z80* const z) {
   return (uint16_t)((hi << 8) | lo);
 }
 
-// TODO 8.57: M1 -- opcode fetch including each CB/ED/DD/FD prefix byte.
+// M1 -- opcode fetch including each CB/ED/DD/FD prefix byte.
 // Separate from nextb() so the host can tell fetches (never checked) apart
 // from operand bytes (also never checked, but a distinct kind).
 static inline uint8_t fetchb(z80* const z) {
@@ -680,7 +680,7 @@ static inline void process_interrupts(z80* const z) {
       // increment -- rw() can't be reused here since it does the latter.
       const uint16_t addr_lo = (uint16_t)(z->i << 8) | z->int_data;
       const uint16_t addr_hi = (uint16_t)(z->i << 8) | ((z->int_data + 1) & 0xFF);
-      // TODO 8.57: im2_vector -- the two IM2 vector-table reads. Low byte
+      // im2_vector -- the two IM2 vector-table reads. Low byte
       // first, as the Z80 bus does, sequenced explicitly: the old single
       // expression left the two rb() calls unsequenced.
       const uint8_t vec_lo = z->read_byte(z->userdata, addr_lo, Z80_READ_IM2_VECTOR);
@@ -764,7 +764,7 @@ void z80_step(z80* const z) {
   if (z->halted) {
     exec_opcode(z, 0x00);
   } else {
-    const uint8_t opcode = fetchb(z); // TODO 8.57: M1 opcode fetch
+    const uint8_t opcode = fetchb(z); // M1 opcode fetch
     exec_opcode(z, opcode);
   }
 
@@ -783,7 +783,7 @@ void z80_debug_output(z80* const z) {
       z->ix, z->iy, z->i, z->r);
 
   printf("\t(%02X %02X %02X %02X), cyc: %lu\n",
-      // TODO 8.57: debug -- trace peeks, never real bus cycles; tagged so
+      // debug -- trace peeks, never real bus cycles; tagged so
       // the host's read-before-write check (data/im2_vector only) skips them.
       z->read_byte(z->userdata, z->pc, Z80_READ_DEBUG),
       z->read_byte(z->userdata, z->pc + 1, Z80_READ_DEBUG),
@@ -1249,10 +1249,10 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     z->l_ = l;
   } break; // exx
 
-  case 0xCB: exec_opcode_cb(z, fetchb(z)); break; // TODO 8.57: M1 prefix byte
-  case 0xED: exec_opcode_ed(z, fetchb(z)); break; // TODO 8.57: M1 prefix byte
-  case 0xDD: exec_opcode_ddfd(z, fetchb(z), &z->ix); break; // TODO 8.57: M1 prefix byte
-  case 0xFD: exec_opcode_ddfd(z, fetchb(z), &z->iy); break; // TODO 8.57: M1 prefix byte
+  case 0xCB: exec_opcode_cb(z, fetchb(z)); break; // M1 prefix byte
+  case 0xED: exec_opcode_ed(z, fetchb(z)); break; // M1 prefix byte
+  case 0xDD: exec_opcode_ddfd(z, fetchb(z), &z->ix); break; // M1 prefix byte
+  case 0xFD: exec_opcode_ddfd(z, fetchb(z), &z->iy); break; // M1 prefix byte
 
   default: fprintf(stderr, "unknown opcode %02X\n", opcode); break;
   }
@@ -1392,8 +1392,8 @@ void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
   } break; // ex (sp),iz
 
   case 0xCB: {
-    uint16_t addr = IZD; // TODO 8.57: operand (d via nextb in IZD)
-    uint8_t op = nextb(z); // TODO 8.57: operand -- final op despite feeding
+    uint16_t addr = IZD; // operand (d via nextb in IZD)
+    uint8_t op = nextb(z); // operand -- final op despite feeding
                            // exec_opcode_dcb (a real Z80 reads it as non-M1)
     exec_opcode_dcb(z, op, addr);
   } break;

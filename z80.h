@@ -8,7 +8,7 @@
 
 typedef struct z80 z80;
 
-// TODO 8.57: every memory read carries its access kind so the host can tell
+// Every memory read carries its access kind so the host can tell
 // opcode fetches and instruction-stream operands apart from data reads
 // without decoding anything. M1 covers the opcode fetch including each
 // CB/ED/DD/FD prefix byte; operand covers immediate/displacement bytes

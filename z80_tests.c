@@ -9,7 +9,7 @@ static uint8_t* memory = NULL;
 static bool test_finished = 0;
 
 static uint8_t rb(void* userdata, uint16_t addr, z80_read_kind_t kind) {
-  (void)kind; // TODO 8.57: cycle-count tests ignore the access kind
+  (void)kind; // cycle-count tests ignore the access kind
   (void)userdata;
   return memory[addr];
 }
