@@ -6,5 +6,29 @@ __pycache__/
 *.pyc
 CLAUDE.md
 *.code-workspace
-.serena/
+
+# Local-only agent tooling -- kept out of the public fork (like CLAUDE.md)
+.worktrees/
 .claude/
+.remember/
+.serena/
+.mcp.json
+.opencode-bwrap
+.firecrawl/
+.pytest_cache/
+/tools/claude_hooks/
+/tools/new-worktree.sh
+/tools/test_guard_git_discard.py
+
+# Sandbox artifacts (bwrap's tmpfs $HOME leaks empty stubs into the repo
+# root when that is the bind target; never project files)
+/.bash_profile
+/.bashrc
+/.gitconfig
+/.gitmodules
+/.profile
+/.ripgreprc
+/.zprofile
+/.zshrc
+/.idea
+/.vscode
