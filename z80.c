@@ -18,8 +18,11 @@ static inline void wb(z80* const z, uint16_t addr, uint8_t val) {
 
 static inline uint16_t rw(z80* const z, uint16_t addr) {
   // TODO 8.57: data -- 16-bit form of rb() above (stack pops, ld hl,(nn)).
-  return (z->read_byte(z->userdata, addr + 1, Z80_READ_DATA) << 8) |
-         z->read_byte(z->userdata, addr, Z80_READ_DATA);
+  // Hi byte first (as written), sequenced explicitly: the old single
+  // expression left the two hook calls unsequenced.
+  const uint8_t hi = z->read_byte(z->userdata, addr + 1, Z80_READ_DATA);
+  const uint8_t lo = z->read_byte(z->userdata, addr, Z80_READ_DATA);
+  return (uint16_t)((hi << 8) | lo);
 }
 
 static inline void ww(z80* const z, uint16_t addr, uint16_t val) {
@@ -47,11 +50,13 @@ static inline uint8_t nextb(z80* const z) {
 
 static inline uint16_t nextw(z80* const z) {
   // TODO 8.57: operand -- 16-bit form of nextb() (jp/call nn addresses,
-  // ld rr,nn). Cannot reuse rw(), which tags data.
+  // ld rr,nn). Cannot reuse rw(), which tags data. Hi byte first (matching
+  // rw()'s order), sequenced explicitly.
   const uint16_t addr = z->pc;
   z->pc += 2;
-  return (z->read_byte(z->userdata, addr + 1, Z80_READ_OPERAND) << 8) |
-         z->read_byte(z->userdata, addr, Z80_READ_OPERAND);
+  const uint8_t hi = z->read_byte(z->userdata, addr + 1, Z80_READ_OPERAND);
+  const uint8_t lo = z->read_byte(z->userdata, addr, Z80_READ_OPERAND);
+  return (uint16_t)((hi << 8) | lo);
 }
 
 // TODO 8.57: M1 -- opcode fetch including each CB/ED/DD/FD prefix byte.
