@@ -7,8 +7,27 @@
 #include "z80_timing.h"
 
 typedef struct z80 z80;
+
+// TODO 8.57: every memory read carries its access kind so the host can tell
+// opcode fetches and instruction-stream operands apart from data reads
+// without decoding anything. M1 covers the opcode fetch including each
+// CB/ED/DD/FD prefix byte; operand covers immediate/displacement bytes
+// (ld a,n, jp nn, the d of (ix+d), and both the d and the final opcode byte
+// of DD CB d op, which a real Z80 reads as non-M1 cycles); im2_vector covers
+// the two IM2 vector-table reads during interrupt acceptance; data covers
+// every other rb/rw (HL/BC/DE/IX+d/nn operands, stack pops, ex (sp),hl,
+// block ops). debug covers z80_debug_output's trace peeks, which are never
+// real bus cycles and must never trip the host's read-before-write check.
+typedef enum {
+  Z80_READ_M1 = 0,
+  Z80_READ_OPERAND = 1,
+  Z80_READ_IM2_VECTOR = 2,
+  Z80_READ_DATA = 3,
+  Z80_READ_DEBUG = 4
+} z80_read_kind_t;
+
 struct z80 {
-  uint8_t (*read_byte)(void*, uint16_t);
+  uint8_t (*read_byte)(void*, uint16_t, z80_read_kind_t);
   void (*write_byte)(void*, uint16_t, uint8_t);
   uint8_t (*port_in)(z80*, uint16_t);
   void (*port_out)(z80*, uint16_t, uint8_t);

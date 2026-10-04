@@ -8,7 +8,9 @@
 static uint8_t* memory = NULL;
 static bool test_finished = 0;
 
-static uint8_t rb(void* userdata, uint16_t addr) {
+static uint8_t rb(void* userdata, uint16_t addr, z80_read_kind_t kind) {
+  (void)kind; // TODO 8.57: cycle-count tests ignore the access kind
+  (void)userdata;
   return memory[addr];
 }
 
@@ -55,8 +57,8 @@ static uint8_t in(z80* const z, uint16_t port) {
   else if (operation == 9) {
     uint16_t addr = (z->d << 8) | z->e;
     do {
-      printf("%c", rb(z, addr++));
-    } while (rb(z, addr) != '$');
+      printf("%c", rb(z->userdata, addr++, Z80_READ_DEBUG));
+    } while (rb(z->userdata, addr, Z80_READ_DEBUG) != '$');
   }
 
   return 0xFF;
