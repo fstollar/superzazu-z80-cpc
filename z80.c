@@ -18,10 +18,10 @@ static inline void wb(z80* const z, uint16_t addr, uint8_t val) {
 
 static inline uint16_t rw(z80* const z, uint16_t addr) {
   // TODO 8.57: data -- 16-bit form of rb() above (stack pops, ld hl,(nn)).
-  // Hi byte first (as written), sequenced explicitly: the old single
-  // expression left the two hook calls unsequenced.
-  const uint8_t hi = z->read_byte(z->userdata, addr + 1, Z80_READ_DATA);
+  // Low byte first, as the Z80 bus does, sequenced explicitly: the old
+  // single expression left the two hook calls unsequenced.
   const uint8_t lo = z->read_byte(z->userdata, addr, Z80_READ_DATA);
+  const uint8_t hi = z->read_byte(z->userdata, addr + 1, Z80_READ_DATA);
   return (uint16_t)((hi << 8) | lo);
 }
 
@@ -50,12 +50,12 @@ static inline uint8_t nextb(z80* const z) {
 
 static inline uint16_t nextw(z80* const z) {
   // TODO 8.57: operand -- 16-bit form of nextb() (jp/call nn addresses,
-  // ld rr,nn). Cannot reuse rw(), which tags data. Hi byte first (matching
-  // rw()'s order), sequenced explicitly.
+  // ld rr,nn). Cannot reuse rw(), which tags data. Low byte first
+  // (matching rw()'s bus order), sequenced explicitly.
   const uint16_t addr = z->pc;
   z->pc += 2;
-  const uint8_t hi = z->read_byte(z->userdata, addr + 1, Z80_READ_OPERAND);
   const uint8_t lo = z->read_byte(z->userdata, addr, Z80_READ_OPERAND);
+  const uint8_t hi = z->read_byte(z->userdata, addr + 1, Z80_READ_OPERAND);
   return (uint16_t)((hi << 8) | lo);
 }
 
@@ -680,11 +680,11 @@ static inline void process_interrupts(z80* const z) {
       // increment -- rw() can't be reused here since it does the latter.
       const uint16_t addr_lo = (uint16_t)(z->i << 8) | z->int_data;
       const uint16_t addr_hi = (uint16_t)(z->i << 8) | ((z->int_data + 1) & 0xFF);
-      // TODO 8.57: im2_vector -- the two IM2 vector-table reads. Hi first
-      // (matching rw()'s order), sequenced explicitly: the old single
+      // TODO 8.57: im2_vector -- the two IM2 vector-table reads. Low byte
+      // first, as the Z80 bus does, sequenced explicitly: the old single
       // expression left the two rb() calls unsequenced.
-      const uint8_t vec_hi = z->read_byte(z->userdata, addr_hi, Z80_READ_IM2_VECTOR);
       const uint8_t vec_lo = z->read_byte(z->userdata, addr_lo, Z80_READ_IM2_VECTOR);
+      const uint8_t vec_hi = z->read_byte(z->userdata, addr_hi, Z80_READ_IM2_VECTOR);
       call(z, (uint16_t)(vec_hi << 8) | vec_lo);
       break;
     }
