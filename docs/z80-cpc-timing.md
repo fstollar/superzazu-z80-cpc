@@ -2,7 +2,8 @@
 docs/z80/reference/z80-cpc-timing.md as of 2026-07-26 (updated: all 12
 original cpctech/grimware conflicts now resolved via RASM as a third
 source; interrupt-acknowledge IM1/IM2/NMI figures corrected via CPCEC
-cross-check, cpctech's own published numbers for those were wrong). That
+cross-check 2026-07-26, then IM1/IM2 corrected again to the ACCC's
+measured 5/7 µs on 2026-10-11). That
 repo is the canonical source if this copy ever needs updating. -->
 
 # Z80 Instruction Timing on Amstrad CPC (NOPs = µs)
@@ -185,8 +186,14 @@ instruction ends up on a genuinely hot path.
 
 ## Other timings
 
-- Interrupt-acknowledge → first instruction of the ISR: **IM 1: 4 µs;
-  IM 2: 6 µs; NMI: 4 µs** (corrected 2026-07-26 — see below). IM 0 still
-  depends on the instruction fetched; no fixed number.
+- Interrupt-acknowledge → first instruction of the ISR: **IM 1: 5 µs;
+  IM 2: 7 µs; NMI: 4 µs**. IM 0 still depends on the instruction fetched;
+  no fixed number.
+  - Corrected 2026-10-11 per ACCC v1.9 §27.4/§27.5 p.281 (and §25.3): an
+    interrupt's call to #38 lasts 5 µs vs 4 µs for RST #38 called by
+    code; the IM 2 call through the table lasts 7 µs. The ACCC outranks
+    CPCEC; cpctech's IM 1 = 5 µs figure was right.
+  - Superseded: the 2026-07-26 correction to IM 1: 4 µs / IM 2: 6 µs
+    (CPCEC-sourced).
 - 1 monitor scanline: 64 µs.
 - 1 PAL (50 Hz) monitor frame: 19968 µs (≈ 312 scanlines × 64 µs).
