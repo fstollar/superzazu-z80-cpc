@@ -158,12 +158,13 @@ DOC_ROW_TO_KEYS = {
 
 # Interrupt-ack values live in the doc's "Other timings" prose bullets,
 # not the table, so they're outside DOC_ROW_TO_KEYS -- checked directly.
-# IM 0 and NMI ack have no fixed doc value (IM 0 is explicitly
-# instruction-dependent; NMI ack isn't covered at all) and stay
-# UNRESOLVED, so they're intentionally not asserted here.
+# IM 0 is the acknowledge overhead on top of the fetched instruction's
+# own cost (Young ch.5: an IM 0 RST takes 13 T like IM 1; ACCC v1.9
+# section 27.4: IM 1 is 5 us vs 4 us for RST #38 by code).
 PROSE_TIMINGS = {
     'INT_ACK_IM1': 5,  # "IM 1: 5 us" (ACCC v1.9 section 27.4)
     'INT_ACK_IM2': 7,  # "IM 2: 7 us" (ACCC v1.9 section 27.5)
+    'INT_ACK_IM0': 1,  # IM 0 overhead: IM 1 (5 us) - RST by code (4 us); Young ch.5, ACCC v1.9 section 27.4
     'NMI_ACK': 4,  # "NMI: 4 us" (not in cpctech at all; CPCEC-sourced)
 }
 
@@ -249,7 +250,7 @@ def main():
             errors.append(f'{field}: doc prose says {expected} but CPC_US resolves to {val}')
 
     unresolved = {k: resolve(k) for k in CPC_US if resolve(k)[1]}
-    expected_unresolved = {'INT_ACK_IM0'}
+    expected_unresolved = set()
     if set(unresolved) != expected_unresolved:
         errors.append(f'UNRESOLVED set changed: {sorted(unresolved)} != '
                        f'{sorted(expected_unresolved)} -- update this script\'s '

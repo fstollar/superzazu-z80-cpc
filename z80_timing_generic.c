@@ -62,5 +62,5 @@ const z80_timing_t z80_timing_generic = {
   .cpir_cpdr_repeat_extra = 5, // real Z80: CPIR/CPDR's repeat bonus is
                                 // the same +5 T-states as LDIR/etc; only
                                 // CPC's stretched-bus timing makes it diverge
-  .nmi_ack = 11, .int_ack_im0 = 11, .int_ack_im1 = 13, .int_ack_im2 = 19,
+  .nmi_ack = 11, .int_ack_im0 = 2, .int_ack_im1 = 13, .int_ack_im2 = 19,
 };

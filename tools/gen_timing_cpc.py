@@ -203,12 +203,11 @@ CPC_US = {
     'DDFD_PASSTHROUGH': 1,
     'DDFDCB_BIT': 6, 'DDFDCB_OTHER': 7,
     'INT_ACK_IM1': 5, 'INT_ACK_IM2': 7, 'NMI_ACK': 4,
-    'INT_ACK_IM0': ('UNRESOLVED', 4,
-        'doc: "depends on the instruction fetched", not a fixed value -- '
-        '4us is a placeholder (CPCEC\'s LD A,(nn)-shaped figure for the '
-        'common RST-style-vector case) instead of the generic-Z80 '
-        'fallback (11), pending a real value; note the fetched opcode\'s '
-        'own table cost is charged on top of it'),
+    # Acknowledge overhead on top of the fetched instruction's own cost.
+    # An IM 0 RST takes 13 T like IM 1 (Young ch.5), and on the CPC IM 1 is
+    # 5 us vs 4 for RST #38 by code (ACCC v1.9 section 27.4), so the
+    # overhead is 1 us.
+    'INT_ACK_IM0': 1,
 }
 
 def resolve(key):

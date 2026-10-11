@@ -28,7 +28,9 @@ typedef struct {
                                    // block-repeat ops on real CPC hardware)
 
   uint8_t nmi_ack;    // NMI acknowledge
-  uint8_t int_ack_im0; // INT acknowledge, interrupt mode 0
+  uint8_t int_ack_im0; // INT acknowledge overhead, interrupt mode 0, on top of
+                       // the fetched opcode's own cost (unlike im1/im2,
+                       // which are totals)
   uint8_t int_ack_im1; // INT acknowledge, interrupt mode 1
   uint8_t int_ack_im2; // INT acknowledge, interrupt mode 2
 } z80_timing_t;
