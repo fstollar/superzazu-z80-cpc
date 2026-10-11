@@ -162,8 +162,8 @@ DOC_ROW_TO_KEYS = {
 # instruction-dependent; NMI ack isn't covered at all) and stay
 # UNRESOLVED, so they're intentionally not asserted here.
 PROSE_TIMINGS = {
-    'INT_ACK_IM1': 4,  # "IM 1: 4 us" (CPCEC-corrected, was cpctech's 5)
-    'INT_ACK_IM2': 6,  # "IM 2: 6 us" (CPCEC-corrected, was cpctech's 19)
+    'INT_ACK_IM1': 5,  # "IM 1: 5 us" (ACCC v1.9 section 27.4)
+    'INT_ACK_IM2': 7,  # "IM 2: 7 us" (ACCC v1.9 section 27.5)
     'NMI_ACK': 4,  # "NMI: 4 us" (not in cpctech at all; CPCEC-sourced)
 }
 

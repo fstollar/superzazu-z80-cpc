@@ -83,8 +83,8 @@ const z80_timing_t z80_timing_cpc = {
   .block_repeat_extra = 1,
   .cpir_cpdr_repeat_extra = 2,
   .nmi_ack = 4,
-  .int_ack_im0 = 4,  // UNRESOLVED: doc: "depends on the instruction fetched", not a fixed value -- 4us used as a more realistic placeholder (matches IM1/NMI's CPCEC-confirmed shape for the common RST-style-vector case) instead of the generic-Z80 fallback (11), pending a real value
-  .int_ack_im1 = 4,
-  .int_ack_im2 = 6,
+  .int_ack_im0 = 4,  // UNRESOLVED: doc: "depends on the instruction fetched", not a fixed value -- 4us is a placeholder (CPCEC's LD A,(nn)-shaped figure for the common RST-style-vector case) instead of the generic-Z80 fallback (11), pending a real value; note the fetched opcode's own table cost is charged on top of it
+  .int_ack_im1 = 5,
+  .int_ack_im2 = 7,
 };
 
