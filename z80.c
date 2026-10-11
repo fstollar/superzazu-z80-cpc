@@ -592,9 +592,14 @@ static void ind(z80* const z) {
 }
 
 static void outi(z80* const z) {
-  z->port_out(z, get_bc(z), rb(z, get_hl(z)));
-  set_hl(z, get_hl(z) + 1);
+  // B is decremented before the port is accessed, so the port address
+  // carries the decremented B (unlike INI/IND, which use BC before the
+  // decrement). The Amstrad CPC compendium relies on this: CPC code loads
+  // B with the port's high byte + 1 before OUTI/OUTD.
+  uint8_t val = rb(z, get_hl(z));
   z->b -= 1;
+  z->port_out(z, get_bc(z), val);
+  set_hl(z, get_hl(z) + 1);
   z->zf = z->b == 0;
   z->nf = 1;
   z->mem_ptr = get_bc(z) + 1;
@@ -603,7 +608,7 @@ static void outi(z80* const z) {
 static void outd(z80* const z) {
   outi(z);
   set_hl(z, get_hl(z) - 2);
-  z->mem_ptr = get_bc(z) - 2;
+  z->mem_ptr = get_bc(z) - 1;
 }
 
 static void daa(z80* const z) {

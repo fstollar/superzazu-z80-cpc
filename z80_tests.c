@@ -68,6 +68,72 @@ static void out(z80* const z, uint16_t port, uint8_t val) {
   test_finished = 1;
 }
 
+// MARK: block output port address
+// OUTI/OUTD decrement B before the port is accessed, so the port address
+// carries the decremented B. (Amstrad CPC compendium, "B is decremented
+// before accessing the port"; memptr_eng.txt gives MEMPTR = BC after the
+// decrement, plus or minus one.)
+static uint16_t last_out_port = 0;
+static uint8_t last_out_val = 0;
+static int out_count = 0;
+
+static void record_out(z80* const z, uint16_t port, uint8_t val) {
+  (void)z;
+  last_out_port = port;
+  last_out_val = val;
+  out_count += 1;
+}
+
+static int check_out_port(const char* name, uint8_t opcode, uint16_t bc,
+    uint16_t expected_port, uint16_t expected_memptr) {
+  z80 z;
+  z80_init(&z);
+  z.read_byte = rb;
+  z.write_byte = wb;
+  z.port_in = in;
+  z.port_out = record_out;
+  memset(memory, 0, MEMORY_SIZE);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = opcode;
+  memory[0x4000] = 0x5A;
+  z.pc = 0;
+  z.h = 0x40;
+  z.l = 0x00;
+  z.b = (uint8_t)(bc >> 8);
+  z.c = (uint8_t)(bc & 0xFF);
+  out_count = 0;
+  z80_step(&z);
+  int failed = 0;
+  if (out_count != 1 || last_out_port != expected_port ||
+      last_out_val != 0x5A) {
+    printf("*** ERROR %s: port %04X value %02X (expected %04X value 5A)\n",
+        name, last_out_port, last_out_val, expected_port);
+    failed = 1;
+  }
+  if (z.mem_ptr != expected_memptr) {
+    printf("*** ERROR %s: MEMPTR %04X (expected %04X)\n", name, z.mem_ptr,
+        expected_memptr);
+    failed = 1;
+  }
+  return failed;
+}
+
+static int run_outi_port_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  // BC=BE01: the port is BD01 (the CPC's CRTC data port address).
+  r += check_out_port("outi", 0xA3, 0xBE01, 0xBD01, 0xBD02);
+  r += check_out_port("outd", 0xAB, 0xBE01, 0xBD01, 0xBD00);
+  r += check_out_port("otir", 0xB3, 0xBE01, 0xBD01, 0xBD02);
+  r += check_out_port("otdr", 0xBB, 0xBE01, 0xBD01, 0xBD00);
+  printf("*** outi port test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: test runner
 static int run_test(
     z80* const z, const char* filename, unsigned long cyc_expected) {
@@ -115,6 +181,10 @@ static int run_test(
 }
 
 int main(int argc, char** argv) {
+  if (argc > 1 && strcmp(argv[1], "outiport") == 0) {
+    return run_outi_port_test();
+  }
+
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
     return 1;
@@ -138,5 +208,8 @@ int main(int argc, char** argv) {
     r += run_test(&cpu, "roms/zexall.cim", 46734978649LU);
 
   free(memory);
+  if (!which) {
+    r += run_outi_port_test();
+  }
   return r != 0;
 }
