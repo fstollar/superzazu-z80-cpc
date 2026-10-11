@@ -26,6 +26,12 @@ typedef enum {
   Z80_READ_DEBUG = 4
 } z80_read_kind_t;
 
+// Kind of bus cycle requested from im0_bus (see struct z80).
+typedef enum {
+  Z80_IM0_INTA = 0, // follow-on opcode byte after a prefix (M1 + IORQ cycle)
+  Z80_IM0_READ = 1  // operand byte (normal memory read)
+} z80_im0_cycle_t;
+
 struct z80 {
   uint8_t (*read_byte)(void*, uint16_t, z80_read_kind_t);
   void (*write_byte)(void*, uint16_t, uint8_t);
@@ -38,6 +44,16 @@ struct z80 {
   // acceptance itself (its automatic bit-5 counter clear), separate from
   // whatever device generated the interrupt via z80_gen_int().
   void (*int_ack)(z80*);
+  // During an IM 0 instruction, supplies every byte after the first (which
+  // comes from z80_gen_int). Z80_IM0_INTA is a follow-on opcode byte after a
+  // CB/ED/DD/FD prefix (an M1/IORQ cycle); Z80_IM0_READ is an operand byte
+  // (n, nn, d), which is a normal memory read. pc is the frozen
+  // pre-interrupt PC: it is never advanced while the instruction runs.
+  // NULL (the default): INTA reads 0xFF (nobody drives the bus); READ is an
+  // ordinary memory read at the frozen PC through read_byte with
+  // Z80_READ_OPERAND, which is what plain memory answers when no device
+  // overrides the read.
+  uint8_t (*im0_bus)(z80*, uint16_t pc, z80_im0_cycle_t cycle);
   void* userdata;
 
   unsigned long cyc; // cycle count (t-states)
@@ -58,6 +74,7 @@ struct z80 {
   bool iff1 : 1, iff2 : 1;
   bool halted : 1;
   bool int_pending : 1, nmi_pending : 1;
+  uint8_t im0_active; // internal: set while an IM 0 instruction runs off the bus
 };
 
 void z80_init(z80* const z);

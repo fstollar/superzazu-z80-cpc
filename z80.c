@@ -45,6 +45,11 @@ static inline uint8_t nextb(z80* const z) {
   // stream (ld a,n, jp nn, jr d, the d of (ix+d)). The M1 prefix/opcode
   // fetches use fetchb() instead; the DD CB d op tail (d and final op,
   // which a real Z80 reads as non-M1 cycles) deliberately stays here.
+  if (z->im0_active) {
+    // IM 0: operand bytes are normal memory reads at the frozen PC.
+    return z->im0_bus ? z->im0_bus(z, z->pc, Z80_IM0_READ)
+                      : z->read_byte(z->userdata, z->pc, Z80_READ_OPERAND);
+  }
   return z->read_byte(z->userdata, z->pc++, Z80_READ_OPERAND);
 }
 
@@ -52,6 +57,16 @@ static inline uint16_t nextw(z80* const z) {
   // operand -- 16-bit form of nextb() (jp/call nn addresses,
   // ld rr,nn). Cannot reuse rw(), which tags data. Low byte first
   // (matching rw()'s bus order), sequenced explicitly.
+  if (z->im0_active) {
+    // IM 0: both bytes are read at the frozen PC, low byte first.
+    const uint8_t lo = z->im0_bus
+        ? z->im0_bus(z, z->pc, Z80_IM0_READ)
+        : z->read_byte(z->userdata, z->pc, Z80_READ_OPERAND);
+    const uint8_t hi = z->im0_bus
+        ? z->im0_bus(z, z->pc, Z80_IM0_READ)
+        : z->read_byte(z->userdata, z->pc, Z80_READ_OPERAND);
+    return (uint16_t)((hi << 8) | lo);
+  }
   const uint16_t addr = z->pc;
   z->pc += 2;
   const uint8_t lo = z->read_byte(z->userdata, addr, Z80_READ_OPERAND);
@@ -63,6 +78,12 @@ static inline uint16_t nextw(z80* const z) {
 // Separate from nextb() so the host can tell fetches (never checked) apart
 // from operand bytes (also never checked, but a distinct kind).
 static inline uint8_t fetchb(z80* const z) {
+  if (z->im0_active) {
+    // IM 0: a follow-on opcode byte after a prefix is another INTA-style M1
+    // cycle -- no PC increment, and it carries the acknowledge overhead.
+    z->cyc += z->timing->int_ack_im0;
+    return z->im0_bus ? z->im0_bus(z, z->pc, Z80_IM0_INTA) : 0xFF;
+  }
   return z->read_byte(z->userdata, z->pc++, Z80_READ_M1);
 }
 
@@ -656,23 +677,30 @@ static inline void process_interrupts(z80* const z) {
     z->halted = 0;
     z->iff1 = 0;
     z->iff2 = 0;
-    inc_r(z);
 
     if (z->int_ack)
       z->int_ack(z);
 
     switch (z->interrupt_mode) {
     case 0:
+      // The first byte (int_data) is read in the INTA M1 cycle. PC stays
+      // frozen at its pre-interrupt value for the whole instruction; bytes
+      // after the first come from im0_bus (or the defaults). R is refreshed
+      // once per M1 by exec_opcode and the prefix handlers.
       z->cyc += z->timing->int_ack_im0;
+      z->im0_active = 1;
       exec_opcode(z, z->int_data);
+      z->im0_active = 0;
       break;
 
     case 1:
+      inc_r(z);
       z->cyc += z->timing->int_ack_im1;
       call(z, 0x38);
       break;
 
     case 2: {
+      inc_r(z);
       z->cyc += z->timing->int_ack_im2;
       // Real Z80 hardware quirk: the jump address's high byte is read from
       // I<<8|(int_data+1), wrapping within the *same* page when int_data is
@@ -707,6 +735,8 @@ void z80_init(z80* const z) {
   z->port_in = NULL;
   z->port_out = NULL;
   z->int_ack = NULL;
+  z->im0_bus = NULL;
+  z->im0_active = 0;
   z->userdata = NULL;
 
   z->cyc = 0;
