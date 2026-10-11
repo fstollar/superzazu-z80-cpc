@@ -576,19 +576,24 @@ static void in_r_c(z80* const z, uint8_t* r) {
 }
 
 static void ini(z80* const z) {
-  uint8_t val = z->port_in(z, get_bc(z));
+  // MEMPTR comes from BC as it was before B is decremented
+  // (memptr_eng.txt: INI MEMPTR = BC_before_decrementing_B + 1).
+  uint16_t bc_before = get_bc(z);
+  uint8_t val = z->port_in(z, bc_before);
   wb(z, get_hl(z), val);
   set_hl(z, get_hl(z) + 1);
   z->b -= 1;
   z->zf = z->b == 0;
   z->nf = 1;
-  z->mem_ptr = get_bc(z) + 1;
+  z->mem_ptr = bc_before + 1;
 }
 
 static void ind(z80* const z) {
+  // IND MEMPTR = BC_before_decrementing_B - 1 (memptr_eng.txt).
+  uint16_t bc_before = get_bc(z);
   ini(z);
   set_hl(z, get_hl(z) - 2);
-  z->mem_ptr = get_bc(z) - 2;
+  z->mem_ptr = bc_before - 1;
 }
 
 static void outi(z80* const z) {

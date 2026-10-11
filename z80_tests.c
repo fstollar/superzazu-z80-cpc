@@ -134,6 +134,51 @@ static int run_outi_port_test(void) {
   return r != 0;
 }
 
+// MARK: block input MEMPTR
+// INI/IND set MEMPTR from BC as it was before B is decremented, plus or
+// minus one (memptr_eng.txt). INIR/INDR do the same on each iteration.
+static int check_in_memptr(const char* name, uint8_t opcode, uint16_t bc,
+    uint16_t expected_memptr) {
+  z80 z;
+  z80_init(&z);
+  z.read_byte = rb;
+  z.write_byte = wb;
+  z.port_in = in;
+  z.port_out = out;
+  memset(memory, 0, MEMORY_SIZE);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = opcode;
+  z.pc = 0;
+  z.h = 0x40;
+  z.l = 0x00;
+  z.b = (uint8_t)(bc >> 8);
+  z.c = (uint8_t)(bc & 0xFF);
+  z80_step(&z);
+  if (z.mem_ptr != expected_memptr) {
+    printf("*** ERROR %s: MEMPTR %04X (expected %04X)\n", name, z.mem_ptr,
+        expected_memptr);
+    return 1;
+  }
+  return 0;
+}
+
+static int run_ini_memptr_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  // BC=BE01: MEMPTR is BE01 + 1 and BE01 - 1, not the decremented BD01 + 1.
+  r += check_in_memptr("ini", 0xA2, 0xBE01, 0xBE02);
+  r += check_in_memptr("ind", 0xAA, 0xBE01, 0xBE00);
+  // One iteration of the repeating forms (B is still non-zero afterwards).
+  r += check_in_memptr("inir", 0xB2, 0xBE01, 0xBE02);
+  r += check_in_memptr("indr", 0xBA, 0xBE01, 0xBE00);
+  printf("*** ini memptr test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: test runner
 static int run_test(
     z80* const z, const char* filename, unsigned long cyc_expected) {
@@ -184,6 +229,9 @@ int main(int argc, char** argv) {
   if (argc > 1 && strcmp(argv[1], "outiport") == 0) {
     return run_outi_port_test();
   }
+  if (argc > 1 && strcmp(argv[1], "inimemptr") == 0) {
+    return run_ini_memptr_test();
+  }
 
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
@@ -210,6 +258,7 @@ int main(int argc, char** argv) {
   free(memory);
   if (!which) {
     r += run_outi_port_test();
+    r += run_ini_memptr_test();
   }
   return r != 0;
 }
