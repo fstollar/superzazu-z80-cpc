@@ -190,7 +190,11 @@ instruction ends up on a genuinely hot path.
   IM 2: 7 µs; NMI: 4 µs**. IM 0: the fetched
   instruction's own cost + 1 µs (an IM 0 RST: 5 µs, same as IM 1 — Young
   ch.5 gives 13 T for both); each further
-  INTA-style M1 after a prefix (CB/ED/DD/FD) adds the same 1 µs.
+  INTA-style M1 after a prefix (CB/ED/DD/FD) is modelled as adding 1 µs
+  more. That per-extra-INTA 1 µs is derived from the Z80's 2 wait states
+  per INTA cycle (Zilog UM0080; redcode/Z80), not measured: it is
+  unverified on a CPC, where nothing drives the bus in IM 0, and the ACCC
+  has no IM 0 material.
   - Corrected 2026-10-11 per ACCC v1.9 §27.4/§27.5 p.281 (and §25.3): an
     interrupt's call to #38 lasts 5 µs vs 4 µs for RST #38 called by
     code; the IM 2 call through the table lasts 7 µs. The ACCC outranks

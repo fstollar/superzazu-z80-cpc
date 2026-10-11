@@ -25,6 +25,8 @@ confirmed (see
 
 This fork also changed `port_in`/`port_out` to receive the real 16-bit port address (computed correctly for both the `IN r,(C)`/`OUT (C),r` and `IN A,(n)`/`OUT (n),A` forms) instead of upstream's low-byte-only signature, since CPC I/O device decoding needs the high byte too.
 
+The fork also adds an `im0_bus(z80*, pc, z80_im0_cycle_t)` callback that supplies the bytes an IM 0 instruction reads after its first: `Z80_IM0_INTA` for each further opcode byte (after a CB/ED/DD/FD prefix) and `Z80_IM0_READ` for operand bytes. PC is frozen at its pre-interrupt value for the whole IM 0 instruction. With `im0_bus` left `NULL`, an INTA cycle reads 0xFF and a READ is a plain memory read at the frozen PC.
+
 Regenerate `z80_timing_cpc.c` after editing `docs/z80-cpc-timing.md` or
 `tools/gen_timing_cpc.py` with `python3 tools/gen_timing_cpc.py`, then
 `python3 tools/verify_cpc_timing.py` before committing.
