@@ -286,6 +286,41 @@ static int run_ei_delay_test(void) {
   return r != 0;
 }
 
+// MARK: RETI restores IFF1
+// RETI copies IFF2 into IFF1 like RETN (z80-documented sections 3.4 and
+// 5.3). It matters after an NMI taken inside a maskable handler: the NMI
+// clears IFF1 only, and a RETI back out of that state must re-enable.
+static int check_reti_iff(const char* name, uint8_t opcode) {
+  z80 z;
+  init_ei_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = opcode;
+  memory[0xF000] = 0x34; // return address 1234
+  memory[0xF001] = 0x12;
+  z.iff1 = 0;
+  z.iff2 = 1;
+  z80_step(&z);
+  if (z.pc != 0x1234 || !z.iff1 || !z.iff2) {
+    printf("*** ERROR %s: pc %04X iff1 %d iff2 %d (expected 1234 1 1)\n",
+        name, z.pc, z.iff1, z.iff2);
+    return 1;
+  }
+  return 0;
+}
+
+static int run_reti_iff_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  r += check_reti_iff("reti", 0x4D);
+  r += check_reti_iff("retn", 0x45);
+  printf("*** reti iff test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: test runner
 static int run_test(
     z80* const z, const char* filename, unsigned long cyc_expected) {
@@ -342,6 +377,9 @@ int main(int argc, char** argv) {
   if (argc > 1 && strcmp(argv[1], "eidelay") == 0) {
     return run_ei_delay_test();
   }
+  if (argc > 1 && strcmp(argv[1], "retiiff") == 0) {
+    return run_reti_iff_test();
+  }
 
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
@@ -370,6 +408,7 @@ int main(int argc, char** argv) {
     r += run_outi_port_test();
     r += run_ini_memptr_test();
     r += run_ei_delay_test();
+    r += run_reti_iff_test();
   }
   return r != 0;
 }

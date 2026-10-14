@@ -1613,7 +1613,10 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     z->iff1 = z->iff2;
     ret(z);
     break; // retn
-  case 0x4D: ret(z); break; // reti
+  case 0x4D:
+    z->iff1 = z->iff2;
+    ret(z);
+    break; // reti
 
   case 0xA0: ldi(z); break; // ldi
   case 0xB0: {
