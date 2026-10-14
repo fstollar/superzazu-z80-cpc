@@ -161,6 +161,15 @@ static inline bool parity(uint8_t val) {
   return (nb_one_bits & 1) == 0;
 }
 
+// Drops the previous instruction's flag state: Q reads 0 and no flags
+// are latched yet. Used after a CB/ED/DD/FD prefix byte (DD/FD SCF/CCF
+// read Q 0), when an NMI or maskable interrupt is accepted, and around
+// the IM 0 instruction off the bus.
+static inline void q_clear(z80* const z) {
+  z->q = 0;
+  z->flags_written = 0;
+}
+
 static void exec_opcode(z80* const z, uint8_t opcode);
 static void exec_opcode_cb(z80* const z, uint8_t opcode);
 static void exec_opcode_dcb(
@@ -231,6 +240,7 @@ static inline void cond_jr(z80* const z, bool condition) {
 // ADD Byte: adds two bytes together
 static inline uint8_t addb(z80* const z, uint8_t a, uint8_t b, bool cy) {
   const uint8_t result = a + b + cy;
+  z->flags_written = 1;
   z->sf = result >> 7;
   z->zf = result == 0;
   z->hf = carry(4, a, b, cy);
@@ -335,6 +345,7 @@ static inline uint8_t dec(z80* const z, uint8_t a) {
 // result in register A
 static inline void land(z80* const z, uint8_t val) {
   const uint8_t result = z->a & val;
+  z->flags_written = 1;
   z->sf = result >> 7;
   z->zf = result == 0;
   z->hf = 1;
@@ -350,6 +361,7 @@ static inline void land(z80* const z, uint8_t val) {
 // result in register A
 static inline void lxor(z80* const z, const uint8_t val) {
   const uint8_t result = z->a ^ val;
+  z->flags_written = 1;
   z->sf = result >> 7;
   z->zf = result == 0;
   z->hf = 0;
@@ -365,6 +377,7 @@ static inline void lxor(z80* const z, const uint8_t val) {
 // result in register A
 static inline void lor(z80* const z, const uint8_t val) {
   const uint8_t result = z->a | val;
+  z->flags_written = 1;
   z->sf = result >> 7;
   z->zf = result == 0;
   z->hf = 0;
@@ -392,6 +405,7 @@ static inline void cp(z80* const z, const uint8_t val) {
 static inline uint8_t cb_rlc(z80* const z, uint8_t val) {
   const bool old = val >> 7;
   val = (val << 1) | old;
+  z->flags_written = 1;
   z->sf = val >> 7;
   z->zf = val == 0;
   z->pf = parity(val);
@@ -407,6 +421,7 @@ static inline uint8_t cb_rlc(z80* const z, uint8_t val) {
 static inline uint8_t cb_rrc(z80* const z, uint8_t val) {
   const bool old = val & 1;
   val = (val >> 1) | (old << 7);
+  z->flags_written = 1;
   z->sf = val >> 7;
   z->zf = val == 0;
   z->nf = 0;
@@ -421,6 +436,7 @@ static inline uint8_t cb_rrc(z80* const z, uint8_t val) {
 // rotate left (simple)
 static inline uint8_t cb_rl(z80* const z, uint8_t val) {
   const bool cf = z->cf;
+  z->flags_written = 1;
   z->cf = val >> 7;
   val = (val << 1) | cf;
   z->sf = val >> 7;
@@ -436,6 +452,7 @@ static inline uint8_t cb_rl(z80* const z, uint8_t val) {
 // rotate right (simple)
 static inline uint8_t cb_rr(z80* const z, uint8_t val) {
   const bool c = z->cf;
+  z->flags_written = 1;
   z->cf = val & 1;
   val = (val >> 1) | (c << 7);
   z->sf = val >> 7;
@@ -450,6 +467,7 @@ static inline uint8_t cb_rr(z80* const z, uint8_t val) {
 
 // shift left preserving sign
 static inline uint8_t cb_sla(z80* const z, uint8_t val) {
+  z->flags_written = 1;
   z->cf = val >> 7;
   val <<= 1;
   z->sf = val >> 7;
@@ -464,6 +482,7 @@ static inline uint8_t cb_sla(z80* const z, uint8_t val) {
 
 // SLL (exactly like SLA, but sets the first bit to 1)
 static inline uint8_t cb_sll(z80* const z, uint8_t val) {
+  z->flags_written = 1;
   z->cf = val >> 7;
   val <<= 1;
   val |= 1;
@@ -479,6 +498,7 @@ static inline uint8_t cb_sll(z80* const z, uint8_t val) {
 
 // shift right preserving sign
 static inline uint8_t cb_sra(z80* const z, uint8_t val) {
+  z->flags_written = 1;
   z->cf = val & 1;
   val = (val >> 1) | (val & 0x80); // 0b10000000
   z->sf = val >> 7;
@@ -493,6 +513,7 @@ static inline uint8_t cb_sra(z80* const z, uint8_t val) {
 
 // shift register right
 static inline uint8_t cb_srl(z80* const z, uint8_t val) {
+  z->flags_written = 1;
   z->cf = val & 1;
   val >>= 1;
   z->sf = val >> 7;
@@ -508,6 +529,7 @@ static inline uint8_t cb_srl(z80* const z, uint8_t val) {
 // tests bit "n" from a byte
 static inline uint8_t cb_bit(z80* const z, uint8_t val, uint8_t n) {
   const uint8_t result = val & (1 << n);
+  z->flags_written = 1;
   z->sf = result >> 7;
   z->zf = result == 0;
   z->yf = GET_BIT(5, val);
@@ -532,6 +554,7 @@ static inline void ldi(z80* const z) {
   // see https://wikiti.brandonw.net/index.php?title=Z80_Instruction_Set
   // for the calculation of xf/yf on LDI
   const uint8_t result = val + z->a;
+  z->flags_written = 1;
   z->xf = GET_BIT(3, result);
   z->yf = GET_BIT(1, result);
 
@@ -568,6 +591,7 @@ static inline void cpd(z80* const z) {
 
 static void in_r_c(z80* const z, uint8_t* r) {
   *r = z->port_in(z, get_bc(z));
+  z->flags_written = 1;
   z->zf = *r == 0;
   z->sf = *r >> 7;
   z->pf = parity(*r);
@@ -583,6 +607,7 @@ static void ini(z80* const z) {
   wb(z, get_hl(z), val);
   set_hl(z, get_hl(z) + 1);
   z->b -= 1;
+  z->flags_written = 1;
   z->zf = z->b == 0;
   z->nf = 1;
   z->mem_ptr = bc_before + 1;
@@ -605,6 +630,7 @@ static void outi(z80* const z) {
   z->b -= 1;
   z->port_out(z, get_bc(z), val);
   set_hl(z, get_hl(z) + 1);
+  z->flags_written = 1;
   z->zf = z->b == 0;
   z->nf = 1;
   z->mem_ptr = get_bc(z) + 1;
@@ -648,6 +674,7 @@ static void daa(z80* const z) {
   z->sf = z->a >> 7;
   z->zf = z->a == 0;
   z->pf = parity(z->a);
+  z->flags_written = 1;
   z->xf = GET_BIT(3, z->a);
   z->yf = GET_BIT(5, z->a);
 }
@@ -666,6 +693,7 @@ static inline void process_interrupts(z80* const z) {
     z->nmi_pending = 0;
     z->halted = 0;
     z->iff1 = 0;
+    q_clear(z);
     inc_r(z);
 
     z->cyc += z->timing->nmi_ack;
@@ -687,6 +715,9 @@ static inline void process_interrupts(z80* const z) {
     z->halted = 0;
     z->iff1 = 0;
     z->iff2 = 0;
+    // accepting the interrupt drops the running instruction's flag
+    // state; the call (or the IM 0 instruction below) latches Q itself.
+    q_clear(z);
 
     if (z->int_ack)
       z->int_ack(z);
@@ -699,6 +730,7 @@ static inline void process_interrupts(z80* const z) {
       // once per M1 by exec_opcode and the prefix handlers.
       z->cyc += z->timing->int_ack_im0;
       z->im0_active = 1;
+      q_clear(z);
       exec_opcode(z, z->int_data);
       z->im0_active = 0;
       break;
@@ -757,6 +789,8 @@ void z80_init(z80* const z) {
   z->ix = 0;
   z->iy = 0;
   z->mem_ptr = 0;
+  z->q = 0;
+  z->flags_written = 0;
 
   // af and sp are set to 0xFFFF after reset,
   // and the other values are undefined (z80-documented)
@@ -802,6 +836,7 @@ void z80_init(z80* const z) {
 // executes the next instruction in memory + handles interrupts
 void z80_step(z80* const z) {
   z->iff_delay = 0;
+  z->flags_written = 0;
   if (z->halted) {
     exec_opcode(z, 0x00);
   } else {
@@ -810,6 +845,9 @@ void z80_step(z80* const z) {
   }
 
   process_interrupts(z);
+
+  // The Q latch: F when the step wrote the flags, else 0.
+  z->q = z->flags_written ? get_f(z) : 0;
 }
 
 void z80_check_interrupt(z80* const z) {
@@ -1091,23 +1129,31 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     z->hf = 1;
     z->xf = GET_BIT(3, z->a);
     z->yf = GET_BIT(5, z->a);
+    z->flags_written = 1;
     break; // cpl
 
-  case 0x37:
+  case 0x37: {
+    // Undocumented X/Y come from (Q ^ F) | A with F from before the
+    // instruction.
+    const uint8_t f_before = get_f(z);
     z->cf = 1;
     z->nf = 0;
     z->hf = 0;
-    z->xf = GET_BIT(3, z->a);
-    z->yf = GET_BIT(5, z->a);
-    break; // scf
+    z->xf = GET_BIT(3, (z->q ^ f_before) | z->a);
+    z->yf = GET_BIT(5, (z->q ^ f_before) | z->a);
+    z->flags_written = 1;
+  } break; // scf
 
-  case 0x3F:
+  case 0x3F: {
+    // Same undocumented X/Y source as SCF; H takes the old C.
+    const uint8_t f_before = get_f(z);
     z->hf = z->cf;
     z->cf = !z->cf;
     z->nf = 0;
-    z->xf = GET_BIT(3, z->a);
-    z->yf = GET_BIT(5, z->a);
-    break; // ccf
+    z->xf = GET_BIT(3, (z->q ^ f_before) | z->a);
+    z->yf = GET_BIT(5, (z->q ^ f_before) | z->a);
+    z->flags_written = 1;
+  } break; // ccf
 
   case 0x07: {
     z->cf = z->a >> 7;
@@ -1116,6 +1162,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     z->hf = 0;
     z->xf = GET_BIT(3, z->a);
     z->yf = GET_BIT(5, z->a);
+    z->flags_written = 1;
   } break; // rlca (rotate left)
 
   case 0x0F: {
@@ -1125,6 +1172,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     z->hf = 0;
     z->xf = GET_BIT(3, z->a);
     z->yf = GET_BIT(5, z->a);
+    z->flags_written = 1;
   } break; // rrca (rotate right)
 
   case 0x17: {
@@ -1135,6 +1183,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     z->hf = 0;
     z->xf = GET_BIT(3, z->a);
     z->yf = GET_BIT(5, z->a);
+    z->flags_written = 1;
   } break; // rla
 
   case 0x1F: {
@@ -1145,6 +1194,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     z->hf = 0;
     z->xf = GET_BIT(3, z->a);
     z->yf = GET_BIT(5, z->a);
+    z->flags_written = 1;
   } break; // rra
 
   case 0xA7: land(z, z->a); break; // and a
@@ -1244,6 +1294,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
   case 0xD1: set_de(z, popw(z)); break; // pop de
   case 0xE1: set_hl(z, popw(z)); break; // pop hl
   case 0xF1: {
+    // pop af changes F without latching Q, so no flags_written here.
     uint16_t val = popw(z);
     z->a = val >> 8;
     set_f(z, val & 0xFF);
@@ -1267,6 +1318,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
   } break; // out (n), a
 
   case 0x08: {
+    // ex af,af' swaps F without latching Q, so no flags_written here.
     uint8_t a = z->a;
     uint8_t f = get_f(z);
 
@@ -1294,10 +1346,10 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     z->l_ = l;
   } break; // exx
 
-  case 0xCB: exec_opcode_cb(z, fetchb(z)); break; // M1 prefix byte
-  case 0xED: exec_opcode_ed(z, fetchb(z)); break; // M1 prefix byte
-  case 0xDD: exec_opcode_ddfd(z, fetchb(z), &z->ix); break; // M1 prefix byte
-  case 0xFD: exec_opcode_ddfd(z, fetchb(z), &z->iy); break; // M1 prefix byte
+  case 0xCB: q_clear(z); exec_opcode_cb(z, fetchb(z)); break; // M1 prefix byte
+  case 0xED: q_clear(z); exec_opcode_ed(z, fetchb(z)); break; // M1 prefix byte
+  case 0xDD: q_clear(z); exec_opcode_ddfd(z, fetchb(z), &z->ix); break; // M1 prefix byte
+  case 0xFD: q_clear(z); exec_opcode_ddfd(z, fetchb(z), &z->iy); break; // M1 prefix byte
 
   default: fprintf(stderr, "unknown opcode %02X\n", opcode); break;
   }
@@ -1590,6 +1642,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     z->xf = GET_BIT(3, z->a);
     z->nf = 0;
     z->pf = z->iff2;
+    z->flags_written = 1;
     break; // ld a,i
 
   case 0x5F:
@@ -1601,6 +1654,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     z->xf = GET_BIT(3, z->a);
     z->nf = 0;
     z->pf = z->iff2;
+    z->flags_written = 1;
     break; // ld a,r
 
   case 0x45:
@@ -1813,6 +1867,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     z->zf = z->a == 0;
     z->sf = z->a >> 7;
     z->pf = parity(z->a);
+    z->flags_written = 1;
     z->mem_ptr = get_hl(z) + 1;
   } break; // rrd
 
@@ -1829,6 +1884,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     z->zf = z->a == 0;
     z->sf = z->a >> 7;
     z->pf = parity(z->a);
+    z->flags_written = 1;
     z->mem_ptr = get_hl(z) + 1;
   } break; // rld
 

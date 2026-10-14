@@ -61,6 +61,12 @@ struct z80 {
 
   uint16_t pc, sp, ix, iy; // special purpose registers
   uint16_t mem_ptr; // "wz" register
+  // Q latch behind SCF/CCF's undocumented X/Y flags: the F of the last
+  // flag-writing instruction, or 0 after anything else. A CB, ED, DD or
+  // FD prefix byte clears it, as does an accepted NMI or maskable
+  // interrupt; POP AF and EX AF,AF' change F without latching it.
+  uint8_t q;
+  uint8_t flags_written; // internal: set when the running step writes the flags
   uint8_t a, b, c, d, e, h, l; // main registers
   uint8_t a_, b_, c_, d_, e_, h_, l_, f_; // alternate registers
   uint8_t i, r; // interrupt vector, memory refresh

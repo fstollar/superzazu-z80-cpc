@@ -468,6 +468,346 @@ static int run_reti_iff_test(void) {
   return r != 0;
 }
 
+// MARK: Q latch
+// The core keeps an 8-bit Q latch behind SCF/CCF's undocumented X/Y
+// flags: after an instruction that wrote the flags Q holds F, otherwise
+// 0. A CB/ED/DD/FD prefix byte clears it (so DD/FD SCF/CCF read Q 0),
+// as does an accepted NMI or maskable interrupt; POP AF and EX AF,AF'
+// change F without latching it.
+static void init_q_cpu(z80* const z) {
+  z80_init(z);
+  z->read_byte = rb;
+  z->write_byte = wb;
+  z->port_in = in;
+  z->port_out = out;
+  memset(memory, 0, MEMORY_SIZE); // NOPs everywhere
+  z->pc = 0;
+  z->sp = 0xF000;
+}
+
+static uint8_t pack_qf(const z80* const z) {
+  return (uint8_t)((z->cf << 0) | (z->nf << 1) | (z->pf << 2) |
+      (z->xf << 3) | (z->hf << 4) | (z->yf << 5) | (z->zf << 6) |
+      (z->sf << 7));
+}
+
+static void seed_qf(z80* const z, uint8_t f) {
+  z->cf = (f >> 0) & 1;
+  z->nf = (f >> 1) & 1;
+  z->pf = (f >> 2) & 1;
+  z->xf = (f >> 3) & 1;
+  z->hf = (f >> 4) & 1;
+  z->yf = (f >> 5) & 1;
+  z->zf = (f >> 6) & 1;
+  z->sf = (f >> 7) & 1;
+}
+
+// z80_init() clears Q; a step must overwrite it, never inherit it, so
+// every check below seeds Q with garbage first.
+static int check_q_init(void) {
+  const char* name = "init";
+  z80 z;
+  z80_init(&z);
+  if (z.q != 0) {
+    printf("*** ERROR %s: q %02X (expected 00)\n", name, z.q);
+    return 1;
+  }
+  return 0;
+}
+
+// ADD A,n writes the flags, so Q latches F: 0xFF + 0x01 wraps to zero
+// with Z, H and C set (F 0x51).
+static int check_q_after_add(void) {
+  const char* name = "add a,n";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xC6; // add a,n
+  memory[0x0001] = 0x01;
+  z.a = 0xFF;
+  z.q = 0xA5;
+  z80_step(&z);
+  if (pack_qf(&z) != 0x51 || z.q != 0x51) {
+    printf("*** ERROR %s: q %02X f %02X (expected 51 51)\n", name, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// NOP writes no flags, so Q is 0 even with F left at 0xFF.
+static int check_q_after_nop(void) {
+  const char* name = "nop";
+  z80 z;
+  init_q_cpu(&z);
+  seed_qf(&z, 0xFF);
+  z.q = 0xA5;
+  z80_step(&z);
+  if (pack_qf(&z) != 0xFF || z.q != 0) {
+    printf("*** ERROR %s: q %02X f %02X (expected 00 FF)\n", name, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// POP AF changes F but must not latch it: Q stays 0.
+static int check_q_after_pop_af(void) {
+  const char* name = "pop af";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xF1; // pop af
+  memory[0xF000] = 0x18; // F
+  memory[0xF001] = 0x00; // A
+  z.q = 0xA5;
+  z80_step(&z);
+  if (z.a != 0 || pack_qf(&z) != 0x18 || z.q != 0) {
+    printf("*** ERROR %s: a %02X q %02X f %02X (expected 00 00 18)\n",
+        name, z.a, z.q, pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// EX AF,AF' swaps F but must not latch it: Q stays 0.
+static int check_q_after_ex_af(void) {
+  const char* name = "ex af,af'";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x08; // ex af,af'
+  z.a = 0x11;
+  seed_qf(&z, 0x22);
+  z.a_ = 0x33;
+  z.f_ = 0x44;
+  z.q = 0xA5;
+  z80_step(&z);
+  if (z.a != 0x33 || pack_qf(&z) != 0x44 || z.q != 0) {
+    printf("*** ERROR %s: a %02X q %02X f %02X (expected 33 00 44)\n",
+        name, z.a, z.q, pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// LD A,I writes the flags (S/Z from A, P from IFF2, C preserved), so Q
+// latches F: I 0x80 with IFF2 set and C seeded gives F 0x85.
+static int check_q_after_ld_a_i(void) {
+  const char* name = "ld a,i";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z.i = 0x80;
+  z.iff2 = 1;
+  seed_qf(&z, 0xFF);
+  z.q = 0xA5;
+  z80_step(&z);
+  if (z.a != 0x80 || pack_qf(&z) != 0x85 || z.q != 0x85) {
+    printf("*** ERROR %s: a %02X q %02X f %02X (expected 80 85 85)\n",
+        name, z.a, z.q, pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// SCF after a flag writer reads Q == F: BIT 3,B leaves F 0x18, so
+// (Q ^ F) | A is 0 and SCF's X/Y come out clear (F 0x01).
+static int check_scf_after_bit(void) {
+  const char* name = "bit 3,b ; scf";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xCB;
+  memory[0x0001] = 0x58; // bit 3,b
+  memory[0x0002] = 0x37; // scf
+  z.a = 0;
+  seed_qf(&z, 0);
+  z.b = 0x08;
+  z.q = 0xA5;
+  z80_step(&z);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x01 || z.q != 0x01) {
+    printf("*** ERROR %s: q %02X f %02X (expected 01 01)\n", name, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// SCF after LD B,0 reads Q 0 with the same F 0x18 before it, so
+// (Q ^ F) | A keeps X set (F 0x09) -- unlike the BIT case above.
+static int check_scf_after_ld(void) {
+  const char* name = "ld b,0 ; scf";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x06; // ld b,n
+  memory[0x0001] = 0x00;
+  memory[0x0002] = 0x37; // scf
+  z.a = 0;
+  seed_qf(&z, 0x18);
+  z.q = 0xA5;
+  z80_step(&z);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x09 || z.q != 0x09) {
+    printf("*** ERROR %s: q %02X f %02X (expected 09 09)\n", name, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// POP AF then SCF behaves like the LD case, not the BIT case: the
+// popped F 0x18 is not latched, so SCF still sees Q 0 (F 0x09).
+static int check_scf_after_pop_af(void) {
+  const char* name = "pop af ; scf";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xF1; // pop af
+  memory[0x0001] = 0x37; // scf
+  memory[0xF000] = 0x18; // F
+  memory[0xF001] = 0x00; // A
+  z.a = 0x99;
+  z.q = 0xA5;
+  z80_step(&z);
+  if (z.q != 0) {
+    printf("*** ERROR %s: q %02X after pop (expected 00)\n", name, z.q);
+    return 1;
+  }
+  z80_step(&z);
+  if (pack_qf(&z) != 0x09 || z.q != 0x09) {
+    printf("*** ERROR %s: q %02X f %02X (expected 09 09)\n", name, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// DD SCF reads Q 0: the prefix byte clears the seeded garbage, so with
+// F 0x44 (Z+P) SCF's X/Y come out clear (F 0x45). An inherited Q 0xFF
+// would give (Q ^ F) | A = 0xBB and F 0x6D instead.
+static int check_dd_scf_clears_q(void) {
+  const char* name = "dd 37";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xDD;
+  memory[0x0001] = 0x37; // scf
+  z.a = 0;
+  seed_qf(&z, 0x44);
+  z.q = 0xFF;
+  z80_step(&z);
+  if (pack_qf(&z) != 0x45 || z.q != 0x45) {
+    printf("*** ERROR %s: q %02X f %02X (expected 45 45)\n", name, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// CCF's formula with Q 0: H takes old C (0), C sets, and X/Y come from
+// (Q ^ F) | A = 0x18, so X sets (F 0x09).
+static int check_ccf_after_ld(void) {
+  const char* name = "ld b,0 ; ccf";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x06; // ld b,n
+  memory[0x0001] = 0x00;
+  memory[0x0002] = 0x3F; // ccf
+  z.a = 0;
+  seed_qf(&z, 0x18);
+  z.q = 0xA5;
+  z80_step(&z);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x09 || z.q != 0x09) {
+    printf("*** ERROR %s: q %02X f %02X (expected 09 09)\n", name, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// Accepting a maskable interrupt drops the running instruction's flag
+// state even when that instruction wrote the flags (ADD leaves F
+// 0x51): Q is 0 afterwards.
+static int check_q_after_int(void) {
+  const char* name = "add a,n with int accepted";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xC6; // add a,n
+  memory[0x0001] = 0x01;
+  z.a = 0xFF;
+  z.interrupt_mode = 1;
+  z.iff1 = 1;
+  z.iff2 = 1;
+  z.q = 0xA5;
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  int r = expect_taken(name, &z, 0x0002);
+  if (z.q != 0) {
+    printf("*** ERROR %s: q %02X (expected 00)\n", name, z.q);
+    return 1;
+  }
+  return r;
+}
+
+// Same for NMI: the ADD's flags don't survive into Q.
+static int check_q_after_nmi(void) {
+  const char* name = "add a,n with nmi accepted";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xC6; // add a,n
+  memory[0x0001] = 0x01;
+  z.a = 0xFF;
+  z.q = 0xA5;
+  z80_gen_nmi(&z);
+  z80_step(&z);
+  if (z.pc != 0x0066 || z.nmi_pending || pushed_return(&z) != 0x0002 ||
+      z.q != 0) {
+    printf("*** ERROR %s: pc %04X return %04X q %02X"
+        " (expected 0066 0002 00)\n", name, z.pc, pushed_return(&z), z.q);
+    return 1;
+  }
+  return 0;
+}
+
+// HALT writes no flags: Q is 0 after it.
+static int check_q_after_halt(void) {
+  const char* name = "halt";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x76; // halt
+  z.q = 0xA5;
+  z80_step(&z);
+  if (!z.halted || z.q != 0) {
+    printf("*** ERROR %s: halted %d q %02X (expected 1 00)\n", name,
+        z.halted, z.q);
+    return 1;
+  }
+  return 0;
+}
+
+static int run_qlatch_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  r += check_q_init();
+  r += check_q_after_add();
+  r += check_q_after_nop();
+  r += check_q_after_pop_af();
+  r += check_q_after_ex_af();
+  r += check_q_after_ld_a_i();
+  r += check_scf_after_bit();
+  r += check_scf_after_ld();
+  r += check_scf_after_pop_af();
+  r += check_dd_scf_clears_q();
+  r += check_ccf_after_ld();
+  r += check_q_after_int();
+  r += check_q_after_nmi();
+  r += check_q_after_halt();
+  printf("*** q latch test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: test runner
 static int run_test(
     z80* const z, const char* filename, unsigned long cyc_expected) {
@@ -527,6 +867,9 @@ int main(int argc, char** argv) {
   if (argc > 1 && strcmp(argv[1], "retiiff") == 0) {
     return run_reti_iff_test();
   }
+  if (argc > 1 && strcmp(argv[1], "qlatch") == 0) {
+    return run_qlatch_test();
+  }
 
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
@@ -556,6 +899,7 @@ int main(int argc, char** argv) {
     r += run_ini_memptr_test();
     r += run_ei_delay_test();
     r += run_reti_iff_test();
+    r += run_qlatch_test();
   }
   return r != 0;
 }
