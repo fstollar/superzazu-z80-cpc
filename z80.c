@@ -662,12 +662,10 @@ static inline uint16_t displace(
 static inline void process_interrupts(z80* const z) {
   // "When an EI instruction is executed, any pending interrupt request
   // is not accepted until after the instruction following EI is executed."
-  if (z->iff_delay > 0) {
-    z->iff_delay -= 1;
-    if (z->iff_delay == 0) {
-      z->iff1 = 1;
-      z->iff2 = 1;
-    }
+  // EI sets the flag for the whole boundary after it, however often the
+  // host checks it (z80_check_interrupt()); z80_step() clears it when the
+  // next instruction starts.
+  if (z->iff_delay) {
     return;
   }
 
@@ -801,6 +799,7 @@ void z80_init(z80* const z) {
 
 // executes the next instruction in memory + handles interrupts
 void z80_step(z80* const z) {
+  z->iff_delay = 0;
   if (z->halted) {
     exec_opcode(z, 0x00);
   } else {
@@ -1040,7 +1039,11 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     z->iff1 = 0;
     z->iff2 = 0;
     break; // di
-  case 0xFB: z->iff_delay = 1; break; // ei
+  case 0xFB:
+    z->iff1 = 1;
+    z->iff2 = 1;
+    z->iff_delay = 1;
+    break; // ei
   case 0x00: break; // nop
   case 0x76: z->halted = 1; break; // halt
 

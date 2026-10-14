@@ -179,6 +179,82 @@ static int run_ini_memptr_test(void) {
   return r != 0;
 }
 
+// MARK: interrupt after EI
+// No interrupt is accepted at the boundary right after EI, only after the
+// instruction that follows it (z80-documented section 5.5). A host that
+// raises an interrupt between z80_step() calls and services it at once with
+// z80_check_interrupt() must get the same answer at that boundary as
+// z80_step()'s own trailing check did.
+static void init_ei_cpu(z80* const z) {
+  z80_init(z);
+  z->read_byte = rb;
+  z->write_byte = wb;
+  z->port_in = in;
+  z->port_out = out;
+  memset(memory, 0, MEMORY_SIZE); // NOPs everywhere
+  z->pc = 0;
+  z->sp = 0xF000;
+  z->interrupt_mode = 1;
+}
+
+static uint16_t pushed_return(const z80* const z) {
+  return (uint16_t)(memory[z->sp] | (memory[(uint16_t)(z->sp + 1)] << 8));
+}
+
+static int check_ei_boundary(const char* name, bool ei_on_bus) {
+  z80 z;
+  init_ei_cpu(&z);
+  if (ei_on_bus) {
+    // IM 0 with EI on the bus: the interrupt is accepted after the NOP at
+    // 0000, EI runs off the bus without moving pc, and pc stays at 0001.
+    z.interrupt_mode = 0;
+    z.iff1 = 1;
+    z.iff2 = 1;
+    z80_gen_int(&z, 0xFB);
+    z80_step(&z);
+    if (z.pc != 0x0001 || !z.iff1 || !z.iff2) {
+      printf("*** ERROR %s: after EI on the bus pc %04X iff1 %d iff2 %d"
+             " (expected 0001 1 1)\n", name, z.pc, z.iff1, z.iff2);
+      return 1;
+    }
+    z.interrupt_mode = 1;
+  } else {
+    memory[0x0000] = 0xFB; // ei
+    z80_step(&z);
+  }
+  const uint16_t next = z.pc;
+
+  // Raised at EI's boundary and checked there again: not accepted.
+  z80_gen_int(&z, 0xFF);
+  z80_check_interrupt(&z);
+  if (z.pc != next || !z.int_pending) {
+    printf("*** ERROR %s: interrupt accepted right after EI (pc %04X)\n",
+        name, z.pc);
+    return 1;
+  }
+  // Accepted once the next instruction has run.
+  z80_step(&z);
+  if (z.pc != 0x0038 || pushed_return(&z) != (uint16_t)(next + 1)) {
+    printf("*** ERROR %s: pc %04X return %04X (expected 0038 %04X)\n", name,
+        z.pc, pushed_return(&z), (uint16_t)(next + 1));
+    return 1;
+  }
+  return 0;
+}
+
+static int run_ei_delay_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  r += check_ei_boundary("ei", false);
+  r += check_ei_boundary("ei on the im 0 bus", true);
+  printf("*** ei delay test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: test runner
 static int run_test(
     z80* const z, const char* filename, unsigned long cyc_expected) {
@@ -232,6 +308,9 @@ int main(int argc, char** argv) {
   if (argc > 1 && strcmp(argv[1], "inimemptr") == 0) {
     return run_ini_memptr_test();
   }
+  if (argc > 1 && strcmp(argv[1], "eidelay") == 0) {
+    return run_ei_delay_test();
+  }
 
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
@@ -259,6 +338,7 @@ int main(int argc, char** argv) {
   if (!which) {
     r += run_outi_port_test();
     r += run_ini_memptr_test();
+    r += run_ei_delay_test();
   }
   return r != 0;
 }

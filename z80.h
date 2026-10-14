@@ -68,6 +68,8 @@ struct z80 {
   // flags: sign, zero, yf, half-carry, xf, parity/overflow, negative, carry
   bool sf : 1, zf : 1, yf : 1, hf : 1, xf : 1, pf : 1, nf : 1, cf : 1;
 
+  // Set by EI: no interrupt is accepted at the boundary right after it.
+  // Cleared when z80_step() starts the next instruction.
   uint8_t iff_delay;
   uint8_t interrupt_mode;
   uint8_t int_data;
@@ -89,7 +91,9 @@ void z80_set_timing(z80* const z, const z80_timing_t* timing);
 // trailing step, so callers only need this if they generate an interrupt
 // (z80_gen_int()/z80_gen_nmi()) *between* z80_step() calls and want it
 // serviced right away instead of waiting for the next z80_step() to reach
-// its own trailing call.
+// its own trailing call. Right after EI nothing is accepted, the same as in
+// z80_step()'s own check: the request stays pending until the instruction
+// after EI has run.
 void z80_check_interrupt(z80* const z);
 
 #endif // Z80_Z80_H_
