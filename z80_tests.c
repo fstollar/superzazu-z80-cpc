@@ -271,6 +271,142 @@ static int check_nmi_after_ei(const char* name, bool raised_during_ei) {
   return 0;
 }
 
+// The interrupt is still pending, not accepted: pc where the program left it.
+static int expect_held(const char* name, const char* where, const z80* const z,
+    uint16_t pc) {
+  if (z->pc != pc || !z->int_pending) {
+    printf("*** ERROR %s: %s pc %04X int_pending %d (expected %04X 1)\n",
+        name, where, z->pc, z->int_pending, pc);
+    return 1;
+  }
+  return 0;
+}
+
+// The interrupt was accepted in IM 1 with `ret` as its return address.
+static int expect_taken(const char* name, const z80* const z, uint16_t ret) {
+  if (z->pc != 0x0038 || z->int_pending || pushed_return(z) != ret) {
+    printf("*** ERROR %s: pc %04X return %04X int_pending %d"
+           " (expected 0038 %04X 0)\n", name, z->pc, pushed_return(z),
+        z->int_pending, ret);
+    return 1;
+  }
+  return 0;
+}
+
+// A run of EIs holds the interrupt off through all of them; it is accepted
+// after the first instruction that is not an EI (z80-documented section 5.5,
+// "a large sequence of EI instructions").
+static int check_ei_ei(void) {
+  const char* name = "ei ; ei";
+  z80 z;
+  init_ei_cpu(&z);
+  memory[0x0000] = 0xFB; // ei
+  memory[0x0001] = 0xFB; // ei
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  z80_check_interrupt(&z);
+  if (expect_held(name, "after the first EI", &z, 0x0001)) {
+    return 1;
+  }
+  z80_step(&z);
+  z80_check_interrupt(&z);
+  if (expect_held(name, "after the second EI", &z, 0x0002)) {
+    return 1;
+  }
+  z80_step(&z); // nop
+  return expect_taken(name, &z, 0x0003);
+}
+
+// DI right after EI clears IFF1 before the hold-off ends, so the interrupt
+// is never accepted and stays pending.
+static int check_ei_di(void) {
+  const char* name = "ei ; di";
+  z80 z;
+  init_ei_cpu(&z);
+  memory[0x0000] = 0xFB; // ei
+  memory[0x0001] = 0xF3; // di
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  z80_step(&z);
+  z80_check_interrupt(&z);
+  if (expect_held(name, "after DI", &z, 0x0002)) {
+    return 1;
+  }
+  z80_step(&z); // nop
+  if (expect_held(name, "after the NOP", &z, 0x0003)) {
+    return 1;
+  }
+  if (z.iff1 || z.iff2) {
+    printf("*** ERROR %s: iff1 %d iff2 %d (expected 0 0)\n", name, z.iff1,
+        z.iff2);
+    return 1;
+  }
+  return 0;
+}
+
+// EI ; HALT with an interrupt pending: accepted at HALT's own boundary, and
+// the return address is the instruction after HALT (z80-documented section
+// 5.4, "the PC is increased before the interrupt routine is called").
+static int check_ei_halt(void) {
+  const char* name = "ei ; halt";
+  z80 z;
+  init_ei_cpu(&z);
+  memory[0x0000] = 0xFB; // ei
+  memory[0x0001] = 0x76; // halt
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  if (expect_held(name, "after EI", &z, 0x0001)) {
+    return 1;
+  }
+  z80_step(&z);
+  if (z.halted) {
+    printf("*** ERROR %s: still halted after the acknowledge\n", name);
+    return 1;
+  }
+  return expect_taken(name, &z, 0x0002);
+}
+
+// DD FB is one instruction that acts as EI: no interrupt between the prefix
+// and FB (z80-documented section 5.5, "including the prefixed ones"), and the
+// hold-off covers the instruction after it, as for a plain EI.
+static int check_prefixed_ei(void) {
+  const char* name = "dd fb";
+  z80 z;
+  init_ei_cpu(&z);
+  memory[0x0000] = 0xDD;
+  memory[0x0001] = 0xFB; // ei
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  z80_check_interrupt(&z);
+  if (expect_held(name, "after DD FB", &z, 0x0002)) {
+    return 1;
+  }
+  if (!z.iff1 || !z.iff2) {
+    printf("*** ERROR %s: iff1 %d iff2 %d (expected 1 1)\n", name, z.iff1,
+        z.iff2);
+    return 1;
+  }
+  z80_step(&z); // nop
+  return expect_taken(name, &z, 0x0003);
+}
+
+// RETN copies IFF2 into IFF1 with no hold-off: a pending interrupt is
+// accepted at RETN's own boundary, with RETN's target as return address.
+static int check_retn_pending(void) {
+  const char* name = "retn with int pending";
+  z80 z;
+  init_ei_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x45; // retn
+  memory[0xF000] = 0x34; // return address 1234
+  memory[0xF001] = 0x12;
+  z.iff1 = 0;
+  z.iff2 = 1;
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  return expect_taken(name, &z, 0x1234);
+}
+
 static int run_ei_delay_test(void) {
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
@@ -281,6 +417,11 @@ static int run_ei_delay_test(void) {
   r += check_ei_boundary("ei on the im 0 bus", true);
   r += check_nmi_after_ei("nmi raised during ei", true);
   r += check_nmi_after_ei("nmi raised after ei", false);
+  r += check_ei_ei();
+  r += check_ei_di();
+  r += check_ei_halt();
+  r += check_prefixed_ei();
+  r += check_retn_pending();
   printf("*** ei delay test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);
   return r != 0;
