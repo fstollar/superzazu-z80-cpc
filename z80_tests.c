@@ -282,12 +282,14 @@ static int expect_held(const char* name, const char* where, const z80* const z,
   return 0;
 }
 
-// The interrupt was accepted in IM 1 with `ret` as its return address.
+// The interrupt was accepted in IM 1 with `ret` as its return address, and
+// the acknowledge cleared both flip-flops.
 static int expect_taken(const char* name, const z80* const z, uint16_t ret) {
-  if (z->pc != 0x0038 || z->int_pending || pushed_return(z) != ret) {
-    printf("*** ERROR %s: pc %04X return %04X int_pending %d"
-           " (expected 0038 %04X 0)\n", name, z->pc, pushed_return(z),
-        z->int_pending, ret);
+  if (z->pc != 0x0038 || z->int_pending || pushed_return(z) != ret ||
+      z->iff1 || z->iff2) {
+    printf("*** ERROR %s: pc %04X return %04X int_pending %d iff1 %d iff2 %d"
+           " (expected 0038 %04X 0 0 0)\n", name, z->pc, pushed_return(z),
+        z->int_pending, z->iff1, z->iff2, ret);
     return 1;
   }
   return 0;
@@ -392,8 +394,8 @@ static int check_prefixed_ei(void) {
 
 // RETN copies IFF2 into IFF1 with no hold-off: a pending interrupt is
 // accepted at RETN's own boundary, with RETN's target as return address.
-static int check_retn_pending(void) {
-  const char* name = "retn with int pending";
+// With IFF2 clear it stays disabled and the interrupt stays pending.
+static int check_retn_pending(const char* name, bool iff2) {
   z80 z;
   init_ei_cpu(&z);
   memory[0x0000] = 0xED;
@@ -401,10 +403,13 @@ static int check_retn_pending(void) {
   memory[0xF000] = 0x34; // return address 1234
   memory[0xF001] = 0x12;
   z.iff1 = 0;
-  z.iff2 = 1;
+  z.iff2 = iff2;
   z80_gen_int(&z, 0xFF);
   z80_step(&z);
-  return expect_taken(name, &z, 0x1234);
+  if (iff2) {
+    return expect_taken(name, &z, 0x1234);
+  }
+  return expect_held(name, "after RETN", &z, 0x1234);
 }
 
 static int run_ei_delay_test(void) {
@@ -421,7 +426,8 @@ static int run_ei_delay_test(void) {
   r += check_ei_di();
   r += check_ei_halt();
   r += check_prefixed_ei();
-  r += check_retn_pending();
+  r += check_retn_pending("retn with int pending", true);
+  r += check_retn_pending("retn with iff2 clear", false);
   printf("*** ei delay test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);
   return r != 0;
