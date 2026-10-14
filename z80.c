@@ -660,15 +660,8 @@ static inline uint16_t displace(
 }
 
 static inline void process_interrupts(z80* const z) {
-  // "When an EI instruction is executed, any pending interrupt request
-  // is not accepted until after the instruction following EI is executed."
-  // EI sets the flag for the whole boundary after it, however often the
-  // host checks it (z80_check_interrupt()); z80_step() clears it when the
-  // next instruction starts.
-  if (z->iff_delay) {
-    return;
-  }
-
+  // NMI is recognised at the end of every instruction, whatever the
+  // interrupt flip-flops say -- so also right after EI.
   if (z->nmi_pending) {
     z->nmi_pending = 0;
     z->halted = 0;
@@ -677,6 +670,15 @@ static inline void process_interrupts(z80* const z) {
 
     z->cyc += z->timing->nmi_ack;
     call(z, 0x66);
+    return;
+  }
+
+  // "When an EI instruction is executed, any pending interrupt request
+  // is not accepted until after the instruction following EI is executed."
+  // EI sets the flag for the whole boundary after it, however often the
+  // host checks it (z80_check_interrupt()); z80_step() clears it when the
+  // next instruction starts.
+  if (z->iff_delay) {
     return;
   }
 

@@ -221,6 +221,11 @@ static int check_ei_boundary(const char* name, bool ei_on_bus) {
   } else {
     memory[0x0000] = 0xFB; // ei
     z80_step(&z);
+    if (z.pc != 0x0001 || !z.iff1 || !z.iff2) {
+      printf("*** ERROR %s: after EI pc %04X iff1 %d iff2 %d"
+             " (expected 0001 1 1)\n", name, z.pc, z.iff1, z.iff2);
+      return 1;
+    }
   }
   const uint16_t next = z.pc;
 
@@ -242,6 +247,30 @@ static int check_ei_boundary(const char* name, bool ei_on_bus) {
   return 0;
 }
 
+// The EI hold-off is for maskable interrupts only: NMI is recognised at the
+// end of every instruction, whatever the interrupt flip-flops say
+// (z80-documented section 2.5, NMI pin), so also right after EI.
+static int check_nmi_after_ei(const char* name, bool raised_during_ei) {
+  z80 z;
+  init_ei_cpu(&z);
+  memory[0x0000] = 0xFB; // ei
+  if (raised_during_ei) {
+    z80_gen_nmi(&z); // taken by z80_step()'s own check at EI's end
+    z80_step(&z);
+  } else {
+    z80_step(&z);
+    z80_gen_nmi(&z);
+    z80_check_interrupt(&z);
+  }
+  if (z.pc != 0x0066 || z.nmi_pending || pushed_return(&z) != 0x0001) {
+    printf("*** ERROR %s: pc %04X return %04X nmi_pending %d"
+           " (expected 0066 0001 0)\n", name, z.pc, pushed_return(&z),
+        z.nmi_pending);
+    return 1;
+  }
+  return 0;
+}
+
 static int run_ei_delay_test(void) {
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
@@ -250,6 +279,8 @@ static int run_ei_delay_test(void) {
   int r = 0;
   r += check_ei_boundary("ei", false);
   r += check_ei_boundary("ei on the im 0 bus", true);
+  r += check_nmi_after_ei("nmi raised during ei", true);
+  r += check_nmi_after_ei("nmi raised after ei", false);
   printf("*** ei delay test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);
   return r != 0;
