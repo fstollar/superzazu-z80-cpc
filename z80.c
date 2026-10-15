@@ -590,6 +590,9 @@ static inline void cpd(z80* const z) {
 }
 
 static void in_r_c(z80* const z, uint8_t* r) {
+  // MEMPTR = BC + 1 for every IN r,(C), taken before r is written (IN B
+  // and IN C change BC).
+  z->mem_ptr = get_bc(z) + 1;
   *r = z->port_in(z, get_bc(z));
   z->flags_written = 1;
   z->zf = *r == 0;
@@ -1248,7 +1251,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
   case 0xFA: cond_jump(z, z->sf == 1); break; // jp m, **
 
   case 0x10: cond_jr(z, --z->b != 0); break; // djnz *
-  case 0x18: z->pc += (int8_t) nextb(z); break; // jr *
+  case 0x18: jr(z, (int8_t) nextb(z)); break; // jr *
   case 0x20: cond_jr(z, z->zf == 0); break; // jr nz, *
   case 0x28: cond_jr(z, z->zf == 1); break; // jr z, *
   case 0x30: cond_jr(z, z->cf == 0); break; // jr nc, *
@@ -1306,7 +1309,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     const uint8_t port = nextb(z);
     const uint8_t a = z->a;
     z->a = z->port_in(z, (uint16_t)(a << 8) | port);
-    z->mem_ptr = (a << 8) | (z->a + 1);
+    z->mem_ptr = (uint16_t)(((a << 8) | port) + 1);
   } break; // in a,(n)
 
   case 0xD3: {
@@ -1368,7 +1371,7 @@ void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
   case 0xE1: *iz = popw(z); break; // pop iz
   case 0xE5: pushw(z, *iz); break; // push iz
 
-  case 0xE9: jump(z, *iz); break; // jp iz
+  case 0xE9: z->pc = *iz; break; // jp iz (like jp (hl), MEMPTR untouched)
 
   case 0x09: addiz(z, iz, get_bc(z)); break; // add iz,bc
   case 0x19: addiz(z, iz, get_de(z)); break; // add iz,de
@@ -1424,8 +1427,16 @@ void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
   case 0x2C: *iz = (IZH << 8) | inc(z, IZL); break; // inc izl
   case 0x2D: *iz = (IZH << 8) | dec(z, IZL); break; // dec izl
 
-  case 0x2A: *iz = rw(z, nextw(z)); break; // ld iz,(**)
-  case 0x22: ww(z, nextw(z), *iz); break; // ld (**),iz
+  case 0x2A: {
+    const uint16_t addr = nextw(z);
+    *iz = rw(z, addr);
+    z->mem_ptr = addr + 1;
+  } break; // ld iz,(**)
+  case 0x22: {
+    const uint16_t addr = nextw(z);
+    ww(z, addr, *iz);
+    z->mem_ptr = addr + 1;
+  } break; // ld (**),iz
   case 0x21: *iz = nextw(z); break; // ld iz,**
 
   case 0x36: {
@@ -1702,8 +1713,6 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
       z->pc -= 2;
       z->cyc += z->timing->cpir_cpdr_repeat_extra;
       z->mem_ptr = z->pc + 1;
-    } else {
-      z->mem_ptr += 1;
     }
   } break; // cpir
   case 0xB9: {
@@ -1711,8 +1720,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     if (get_bc(z) != 0 && !z->zf) {
       z->pc -= 2;
       z->cyc += z->timing->cpir_cpdr_repeat_extra;
-    } else {
-      z->mem_ptr += 1;
+      z->mem_ptr = z->pc + 1;
     }
   } break; // cpdr
 
@@ -1728,7 +1736,6 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
   } break; // in (c)
   case 0x78:
     in_r_c(z, &z->a);
-    z->mem_ptr = get_bc(z) + 1;
     break; // in a, (c)
 
   case 0xA2: ini(z); break; // ini
@@ -1737,6 +1744,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     if (z->b > 0) {
       z->pc -= 2;
       z->cyc += z->timing->block_repeat_extra;
+      z->mem_ptr = z->pc + 1;
     }
     break; // inir
   case 0xAA: ind(z); break; // ind
@@ -1745,16 +1753,38 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     if (z->b > 0) {
       z->pc -= 2;
       z->cyc += z->timing->block_repeat_extra;
+      z->mem_ptr = z->pc + 1;
     }
     break; // indr
 
-  case 0x41: z->port_out(z, get_bc(z), z->b); break; // out (c), b
-  case 0x49: z->port_out(z, get_bc(z), z->c); break; // out (c), c
-  case 0x51: z->port_out(z, get_bc(z), z->d); break; // out (c), d
-  case 0x59: z->port_out(z, get_bc(z), z->e); break; // out (c), e
-  case 0x61: z->port_out(z, get_bc(z), z->h); break; // out (c), h
-  case 0x69: z->port_out(z, get_bc(z), z->l); break; // out (c), l
-  case 0x71: z->port_out(z, get_bc(z), 0); break; // out (c), 0
+  case 0x41:
+    z->port_out(z, get_bc(z), z->b);
+    z->mem_ptr = get_bc(z) + 1;
+    break; // out (c), b
+  case 0x49:
+    z->port_out(z, get_bc(z), z->c);
+    z->mem_ptr = get_bc(z) + 1;
+    break; // out (c), c
+  case 0x51:
+    z->port_out(z, get_bc(z), z->d);
+    z->mem_ptr = get_bc(z) + 1;
+    break; // out (c), d
+  case 0x59:
+    z->port_out(z, get_bc(z), z->e);
+    z->mem_ptr = get_bc(z) + 1;
+    break; // out (c), e
+  case 0x61:
+    z->port_out(z, get_bc(z), z->h);
+    z->mem_ptr = get_bc(z) + 1;
+    break; // out (c), h
+  case 0x69:
+    z->port_out(z, get_bc(z), z->l);
+    z->mem_ptr = get_bc(z) + 1;
+    break; // out (c), l
+  case 0x71:
+    z->port_out(z, get_bc(z), 0);
+    z->mem_ptr = get_bc(z) + 1;
+    break; // out (c), 0
   case 0x79:
     z->port_out(z, get_bc(z), z->a);
     z->mem_ptr = get_bc(z) + 1;
@@ -1766,6 +1796,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     if (z->b > 0) {
       z->pc -= 2;
       z->cyc += z->timing->block_repeat_extra;
+      z->mem_ptr = z->pc + 1;
     }
   } break; // otir
   case 0xAB: outd(z); break; // outd
@@ -1774,6 +1805,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     if (z->b > 0) {
       z->pc -= 2;
       z->cyc += z->timing->block_repeat_extra;
+      z->mem_ptr = z->pc + 1;
     }
   } break; // otdr
 

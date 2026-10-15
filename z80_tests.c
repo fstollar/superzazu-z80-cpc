@@ -72,7 +72,8 @@ static void out(z80* const z, uint16_t port, uint8_t val) {
 // OUTI/OUTD decrement B before the port is accessed, so the port address
 // carries the decremented B. (Amstrad CPC compendium, "B is decremented
 // before accessing the port"; memptr_eng.txt gives MEMPTR = BC after the
-// decrement, plus or minus one.)
+// decrement, plus or minus one.) OTIR/OTDR do the same on their last
+// iteration; an iteration that repeats sets MEMPTR to PC + 1 instead.
 static uint16_t last_out_port = 0;
 static uint8_t last_out_val = 0;
 static int out_count = 0;
@@ -127,8 +128,13 @@ static int run_outi_port_test(void) {
   // BC=BE01: the port is BD01 (the CPC's CRTC data port address).
   r += check_out_port("outi", 0xA3, 0xBE01, 0xBD01, 0xBD02);
   r += check_out_port("outd", 0xAB, 0xBE01, 0xBD01, 0xBD00);
-  r += check_out_port("otir", 0xB3, 0xBE01, 0xBD01, 0xBD02);
-  r += check_out_port("otdr", 0xBB, 0xBE01, 0xBD01, 0xBD00);
+  // One repeating iteration of OTIR/OTDR (B is still non-zero afterwards):
+  // MEMPTR is PC + 1 of the rewound instruction.
+  r += check_out_port("otir", 0xB3, 0xBE01, 0xBD01, 0x0001);
+  r += check_out_port("otdr", 0xBB, 0xBE01, 0xBD01, 0x0001);
+  // The last iteration (B=1 becomes 0) behaves as OUTI/OUTD.
+  r += check_out_port("otir last", 0xB3, 0x0101, 0x0001, 0x0002);
+  r += check_out_port("otdr last", 0xBB, 0x0101, 0x0001, 0x0000);
   printf("*** outi port test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);
   return r != 0;
@@ -136,7 +142,8 @@ static int run_outi_port_test(void) {
 
 // MARK: block input MEMPTR
 // INI/IND set MEMPTR from BC as it was before B is decremented, plus or
-// minus one (memptr_eng.txt). INIR/INDR do the same on each iteration.
+// minus one (memptr_eng.txt). INIR/INDR do the same on their last
+// iteration; an iteration that repeats sets MEMPTR to PC + 1 instead.
 static int check_in_memptr(const char* name, uint8_t opcode, uint16_t bc,
     uint16_t expected_memptr) {
   z80 z;
@@ -171,10 +178,108 @@ static int run_ini_memptr_test(void) {
   // BC=BE01: MEMPTR is BE01 + 1 and BE01 - 1, not the decremented BD01 + 1.
   r += check_in_memptr("ini", 0xA2, 0xBE01, 0xBE02);
   r += check_in_memptr("ind", 0xAA, 0xBE01, 0xBE00);
-  // One iteration of the repeating forms (B is still non-zero afterwards).
-  r += check_in_memptr("inir", 0xB2, 0xBE01, 0xBE02);
-  r += check_in_memptr("indr", 0xBA, 0xBE01, 0xBE00);
+  // One repeating iteration (B is still non-zero afterwards): PC + 1.
+  r += check_in_memptr("inir", 0xB2, 0xBE01, 0x0001);
+  r += check_in_memptr("indr", 0xBA, 0xBE01, 0x0001);
+  // The last iteration (B=1 becomes 0) behaves as INI/IND.
+  r += check_in_memptr("inir last", 0xB2, 0x0101, 0x0102);
+  r += check_in_memptr("indr last", 0xBA, 0x0101, 0x0100);
   printf("*** ini memptr test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
+// MARK: MEMPTR of single instructions
+// Runs one instruction at address 0 and checks MEMPTR afterwards. MEMPTR
+// starts at 1234 so that instructions which leave it alone, or only step
+// it by one, can be told apart. memptr_eng.txt describes each rule.
+static int check_memptr(const char* name, const uint8_t* code, int len,
+    uint8_t a, uint16_t bc, uint16_t de, uint16_t hl, uint16_t ix,
+    uint8_t at_hl, uint16_t expected_memptr) {
+  z80 z;
+  z80_init(&z);
+  z.read_byte = rb;
+  z.write_byte = wb;
+  z.port_in = in;
+  z.port_out = out;
+  memset(memory, 0, MEMORY_SIZE);
+  memcpy(memory, code, (size_t)len);
+  memory[hl] = at_hl;
+  z.pc = 0;
+  z.a = a;
+  z.b = (uint8_t)(bc >> 8);
+  z.c = (uint8_t)(bc & 0xFF);
+  z.d = (uint8_t)(de >> 8);
+  z.e = (uint8_t)(de & 0xFF);
+  z.h = (uint8_t)(hl >> 8);
+  z.l = (uint8_t)(hl & 0xFF);
+  z.ix = ix;
+  z.mem_ptr = 0x1234;
+  z80_step(&z);
+  if (z.mem_ptr != expected_memptr) {
+    printf("*** ERROR %s: MEMPTR %04X (expected %04X)\n", name, z.mem_ptr,
+        expected_memptr);
+    return 1;
+  }
+  return 0;
+}
+
+static int run_memptr_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  static const uint8_t cpir[] = {0xED, 0xB1};
+  static const uint8_t cpdr[] = {0xED, 0xB9};
+  static const uint8_t ldir[] = {0xED, 0xB0};
+  static const uint8_t lddr[] = {0xED, 0xB8};
+  static const uint8_t in_a_n[] = {0xDB, 0xFF};
+  static const uint8_t in_a_fe[] = {0xDB, 0xFE};
+  static const uint8_t jr[] = {0x18, 0x05};
+  static const uint8_t jp_ix[] = {0xDD, 0xE9};
+  static const uint8_t ld_nn_ix[] = {0xDD, 0x22, 0x00, 0x60};
+  static const uint8_t ld_ix_nn[] = {0xDD, 0x2A, 0x00, 0x60};
+  static const uint8_t out_c_b[] = {0xED, 0x41};
+  static const uint8_t in_b_c[] = {0xED, 0x40};
+  int r = 0;
+  // CPIR/CPDR: a repeating iteration sets PC + 1; the last one (BC reaches
+  // 0, or A matches) behaves as CPI/CPD, MEMPTR + 1 or - 1.
+  r += check_memptr("cpir repeat", cpir, 2, 0x01, 0x0002, 0, 0x4000, 0, 0x00,
+      0x0001);
+  r += check_memptr("cpir last bc", cpir, 2, 0x01, 0x0001, 0, 0x4000, 0, 0x00,
+      0x1235);
+  r += check_memptr("cpir last match", cpir, 2, 0x01, 0x0005, 0, 0x4000, 0,
+      0x01, 0x1235);
+  r += check_memptr("cpdr repeat", cpdr, 2, 0x01, 0x0002, 0, 0x4000, 0, 0x00,
+      0x0001);
+  r += check_memptr("cpdr last bc", cpdr, 2, 0x01, 0x0001, 0, 0x4000, 0, 0x00,
+      0x1233);
+  r += check_memptr("cpdr last match", cpdr, 2, 0x01, 0x0005, 0, 0x4000, 0,
+      0x01, 0x1233);
+  // LDIR/LDDR: PC + 1 on a repeating iteration, unchanged on the last one.
+  r += check_memptr("ldir repeat", ldir, 2, 0, 0x0002, 0x5000, 0x4000, 0, 0,
+      0x0001);
+  r += check_memptr("ldir last", ldir, 2, 0, 0x0001, 0x5000, 0x4000, 0, 0,
+      0x1234);
+  r += check_memptr("lddr last", lddr, 2, 0, 0x0001, 0x5000, 0x4000, 0, 0,
+      0x1234);
+  // IN A,(n): (A << 8 | n) + 1, A taken before the read; n=FF carries.
+  // The input value (FF from in()) must not be used: n=FE tells them apart.
+  r += check_memptr("in a,(n)", in_a_n, 2, 0x12, 0, 0, 0x4000, 0, 0, 0x1300);
+  r += check_memptr("in a,(fe)", in_a_fe, 2, 0x12, 0, 0, 0x4000, 0, 0,
+      0x12FF);
+  // JR e: the jump target.
+  r += check_memptr("jr", jr, 2, 0, 0, 0, 0x4000, 0, 0, 0x0007);
+  // JP (IX) leaves MEMPTR alone.
+  r += check_memptr("jp (ix)", jp_ix, 2, 0, 0, 0, 0x4000, 0x5678, 0, 0x1234);
+  // LD (nn),IX and LD IX,(nn): nn + 1.
+  r += check_memptr("ld (nn),ix", ld_nn_ix, 4, 0, 0, 0, 0x4000, 0, 0, 0x6001);
+  r += check_memptr("ld ix,(nn)", ld_ix_nn, 4, 0, 0, 0, 0x4000, 0, 0, 0x6001);
+  // OUT (C),r and IN r,(C): BC + 1, with BC taken before IN B writes B.
+  r += check_memptr("out (c),b", out_c_b, 2, 0, 0x12FF, 0, 0x4000, 0, 0,
+      0x1300);
+  r += check_memptr("in b,(c)", in_b_c, 2, 0, 0x12FF, 0, 0x4000, 0, 0, 0x1300);
+  printf("*** memptr test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);
   return r != 0;
 }
@@ -861,6 +966,9 @@ int main(int argc, char** argv) {
   if (argc > 1 && strcmp(argv[1], "inimemptr") == 0) {
     return run_ini_memptr_test();
   }
+  if (argc > 1 && strcmp(argv[1], "memptr") == 0) {
+    return run_memptr_test();
+  }
   if (argc > 1 && strcmp(argv[1], "eidelay") == 0) {
     return run_ei_delay_test();
   }
@@ -897,6 +1005,7 @@ int main(int argc, char** argv) {
   if (!which) {
     r += run_outi_port_test();
     r += run_ini_memptr_test();
+    r += run_memptr_test();
     r += run_ei_delay_test();
     r += run_reti_iff_test();
     r += run_qlatch_test();
