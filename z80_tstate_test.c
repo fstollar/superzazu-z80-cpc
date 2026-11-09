@@ -222,18 +222,18 @@ static void check_trace(const char *label, z80 *z, const int *rows, unsigned nro
 #if CHECK_BUS_TIMES
   {
     unsigned start = 0;
-    unsigned ev = 0;
+    unsigned event_index = 0;
     for (unsigned i = 0; i < nrows; ++i) {
       if (rows[i] < 0) {
         start += (unsigned)-rows[i];
         continue;
       }
-      if (event_start[ev] != start) {
-        printf("FAIL %s: event %u starts at %u, row gives %u\n", label, ev, event_start[ev], start);
+      if (event_start[event_index] != start) {
+        printf("FAIL %s: event %u starts at %u, row gives %u\n", label, event_index, event_start[event_index], start);
         ++failures;
       }
       start += (unsigned)rows[i];
-      ++ev;
+      ++event_index;
     }
   }
 #else
@@ -271,8 +271,8 @@ static void sweep_base(void) {
       continue;
     z80 z;
     set_base(&z);
-    uint8_t b[8] = {(uint8_t)op, 0, 0, 0, 0, 0, 0, 0};
-    load_bytes(b, 8);
+    uint8_t code[8] = {(uint8_t)op, 0, 0, 0, 0, 0, 0, 0};
+    load_bytes(code, 8);
     char label[32];
     snprintf(label, sizeof(label), "base %02X", op);
     begin_step(&z);
@@ -285,8 +285,8 @@ static void sweep_cb(void) {
   for (unsigned op = 0; op < 256; ++op) {
     z80 z;
     set_base(&z);
-    uint8_t b[2] = {0xCB, (uint8_t)op};
-    load_bytes(b, 2);
+    uint8_t code[2] = {0xCB, (uint8_t)op};
+    load_bytes(code, 2);
     char label[32];
     snprintf(label, sizeof(label), "cb %02X", op);
     begin_step(&z);
@@ -302,8 +302,8 @@ static void sweep_ed(void) {
     /* B and BC of 1: no block iteration ever repeats here. */
     z.b = 1;
     z.c = 1;
-    uint8_t b[2] = {0xED, (uint8_t)op};
-    load_bytes(b, 2);
+    uint8_t code[2] = {0xED, (uint8_t)op};
+    load_bytes(code, 2);
     char label[32];
     snprintf(label, sizeof(label), "ed %02X", op);
     begin_step(&z);
@@ -316,10 +316,10 @@ static void sweep_ed(void) {
 static void run_ddfd(uint8_t prefix, uint8_t op, const uint8_t *tail, int tail_n, const char *tag) {
   z80 z;
   set_base(&z);
-  uint8_t b[8] = {prefix, op, 0, 0, 0, 0, 0, 0};
+  uint8_t code[8] = {prefix, op, 0, 0, 0, 0, 0, 0};
   for (int i = 0; i < tail_n && 2 + i < 8; ++i)
-    b[2 + i] = tail[i];
-  load_bytes(b, 8);
+    code[2 + i] = tail[i];
+  load_bytes(code, 8);
   char label[48];
   if (op == 0xCB)
     snprintf(label, sizeof(label), "%s cb %02X", tag, tail_n > 1 ? tail[1] : 0);
@@ -334,8 +334,8 @@ static void sweep_ddfd(uint8_t prefix, const char *tag) {
   for (unsigned op = 0; op < 256; ++op) {
     if (op == 0xCB) {
       for (unsigned tail = 0; tail < 256; ++tail) {
-        uint8_t t[2] = {0x00, (uint8_t)tail};
-        run_ddfd(prefix, 0xCB, t, 2, tag);
+        uint8_t tail_bytes[2] = {0x00, (uint8_t)tail};
+        run_ddfd(prefix, 0xCB, tail_bytes, 2, tag);
       }
     } else {
       run_ddfd(prefix, (uint8_t)op, 0, 0, tag);
@@ -348,10 +348,10 @@ static void cond_case(const char *label, uint8_t op, const uint8_t *extra, int e
                       const int *rows, unsigned nrows) {
   z80 z;
   set_base(&z);
-  uint8_t b[8] = {op, 0, 0, 0, 0, 0, 0, 0};
+  uint8_t code[8] = {op, 0, 0, 0, 0, 0, 0, 0};
   for (int i = 0; i < extra_n && 1 + i < 8; ++i)
-    b[1 + i] = extra[i];
-  load_bytes(b, 8);
+    code[1 + i] = extra[i];
+  load_bytes(code, 8);
   /* take_flags picks the flag setup: bit 0 sets zf, 1 sets cf, 2 sets pf,
      3 sets sf; taken means the branch condition holds. */
   z.zf = (take_flags & 1) != 0;
@@ -397,8 +397,8 @@ static void cond_cases(void) {
     static const int djnz_taken[] = {5, 3, -5};
     set_base(&z);
     z.b = 2;
-    uint8_t b[8] = {0x10, 0x04, 0, 0, 0, 0, 0, 0};
-    load_bytes(b, 8);
+    uint8_t code[8] = {0x10, 0x04, 0, 0, 0, 0, 0, 0};
+    load_bytes(code, 8);
     begin_step(&z);
     z80_step(&z);
     end_step("djnz taken", &z);
@@ -410,8 +410,8 @@ static void cond_cases(void) {
     static const int djnz_not[] = {5, 3};
     set_base(&z);
     z.b = 1;
-    uint8_t b[8] = {0x10, 0x04, 0, 0, 0, 0, 0, 0};
-    load_bytes(b, 8);
+    uint8_t code[8] = {0x10, 0x04, 0, 0, 0, 0, 0, 0};
+    load_bytes(code, 8);
     begin_step(&z);
     z80_step(&z);
     end_step("djnz not taken", &z);
@@ -454,8 +454,8 @@ static void cond_cases(void) {
     {
       z80 z;
       set_base(&z);
-      uint8_t b[1] = {cond_branches[i].ret};
-      load_bytes(b, 1);
+      uint8_t code[1] = {cond_branches[i].ret};
+      load_bytes(code, 1);
       ram[0xF000] = 0x00;
       ram[0xF001] = 0x20;
       z.sf = z.zf = z.yf = z.hf = z.xf = z.pf = z.nf = z.cf = 0;
@@ -493,8 +493,8 @@ static void block_case(const char *label, uint8_t ed_op, int repeat, int use_b,
   }
   if (repeat && (ed_op == 0xB1 || ed_op == 0xB9))
     ram[0x4000] = 1; /* A reads an unequal byte, so no match ends it */
-  uint8_t b[2] = {0xED, ed_op};
-  load_bytes(b, 2);
+  uint8_t code[2] = {0xED, ed_op};
+  load_bytes(code, 2);
   begin_step(&z);
   z80_step(&z);
   end_step(label, &z);
@@ -546,8 +546,8 @@ static void ex_sp_case(void) {
   z80 z;
   static const int rows[] = {4, 3, 4, 3, 5};
   set_base(&z);
-  uint8_t b[1] = {0xE3};
-  load_bytes(b, 1);
+  uint8_t code[1] = {0xE3};
+  load_bytes(code, 1);
   ram[0xF000] = 0x34;
   ram[0xF001] = 0x12;
   begin_step(&z);
@@ -569,16 +569,16 @@ static void in_out_c_cases(void) {
     char label[40];
     snprintf(label, sizeof(label), "in %u,(c)", r);
     set_base(&z);
-    uint8_t b[2] = {0xED, (uint8_t)(0x40 + 8 * r)};
-    load_bytes(b, 2);
+    uint8_t code_in[2] = {0xED, (uint8_t)(0x40 + 8 * r)};
+    load_bytes(code_in, 2);
     begin_step(&z);
     z80_step(&z);
     end_step(label, &z);
     check_trace(label, &z, rows, 3);
     snprintf(label, sizeof(label), "out (c),%u", r);
     set_base(&z);
-    uint8_t c[2] = {0xED, (uint8_t)(0x41 + 8 * r)};
-    load_bytes(c, 2);
+    uint8_t code_out[2] = {0xED, (uint8_t)(0x41 + 8 * r)};
+    load_bytes(code_out, 2);
     begin_step(&z);
     z80_step(&z);
     end_step(label, &z);
@@ -593,16 +593,16 @@ static void ddcb_cases(void) {
   static const int other_rows[] = {4, 4, 3, 5, 4, 3};
   z80 z;
   set_base(&z);
-  uint8_t b[4] = {0xDD, 0xCB, 0x05, 0x46};
-  load_bytes(b, 4);
+  uint8_t code_bit[4] = {0xDD, 0xCB, 0x05, 0x46};
+  load_bytes(code_bit, 4);
   begin_step(&z);
   z80_step(&z);
   end_step("ddcb bit", &z);
   check_pc("ddcb bit", &z, 0x1004);
   check_trace("ddcb bit", &z, bit_rows, 5);
   set_base(&z);
-  uint8_t c[4] = {0xDD, 0xCB, 0x05, 0x06};
-  load_bytes(c, 4);
+  uint8_t code_rlc[4] = {0xDD, 0xCB, 0x05, 0x06};
+  load_bytes(code_rlc, 4);
   begin_step(&z);
   z80_step(&z);
   end_step("ddcb rlc", &z);
@@ -615,8 +615,8 @@ static void ix_d_n_case(void) {
   z80 z;
   static const int rows[] = {4, 4, 3, 5, 3};
   set_base(&z);
-  uint8_t b[4] = {0xDD, 0x36, 0x05, 0x42};
-  load_bytes(b, 4);
+  uint8_t code[4] = {0xDD, 0x36, 0x05, 0x42};
+  load_bytes(code, 4);
   begin_step(&z);
   z80_step(&z);
   end_step("ld (ix+5),n", &z);
@@ -641,8 +641,8 @@ static void ack_case(const char *label, enum ack_kind kind, uint16_t want_pc,
   z80 z;
   set_base(&z);
   z.iff1 = 1;
-  uint8_t b[1] = {0x00};
-  load_bytes(b, 1);
+  uint8_t code[1] = {0x00};
+  load_bytes(code, 1);
   if (kind == ACK_NMI) {
     z80_gen_nmi(&z);
   } else {
