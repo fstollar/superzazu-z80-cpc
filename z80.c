@@ -1571,7 +1571,8 @@ void exec_opcode_cb(z80* const z, uint8_t opcode) {
   case 3: *reg |= 1 << y_; break; // SET y, r[z]
   }
 
-  if (reg == &hl) {
+  // BIT n,(HL) only reads; every other CB operation on (HL) writes back.
+  if (reg == &hl && x_ != 1) {
     wb(z, get_hl(z), hl);
   }
 }
