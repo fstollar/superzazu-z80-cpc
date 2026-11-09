@@ -17,8 +17,9 @@
  * No WAIT is driven here (that is the T2 test's job) and no dynamic waits
  * are added, so the run is fully deterministic.
  *
- * Needs the timed-bus-cycles interface: the T counter in struct z80
- * (separate from the microsecond cyc) and the per-callback start-T field.
+ * Needs the timed-bus-cycles interface: the t_counter field in struct z80
+ * (separate from the microsecond cyc) and the per-callback bus_cycle_start
+ * field.
  * Compile with -DT1_VALIDATE_DRIVER to check this driver against the
  * current cycle charging instead: expectations then go through cyc and
  * the start-T recording is skipped. That is how the committed test was
@@ -31,12 +32,12 @@
 #include "z80_timing.h"
 
 #ifdef T1_VALIDATE_DRIVER
-#define CUR_T(z) ((z)->cyc)
-#define CB_T_NOW(z) (0u)
+#define READ_T_COUNTER(z) ((z)->cyc)
+#define CALLBACK_BUS_CYCLE_START(z) (0u)
 #define CHECK_BUS_TIMES 0
 #else
-#define CUR_T(z) ((z)->t)
-#define CB_T_NOW(z) ((z)->bus_t)
+#define READ_T_COUNTER(z) ((z)->t_counter)
+#define CALLBACK_BUS_CYCLE_START(z) ((z)->bus_cycle_start)
 #define CHECK_BUS_TIMES 1
 #endif
 
@@ -51,14 +52,14 @@ static uint8_t read_byte(void *u, uint16_t a, z80_read_kind_t k) {
   (void)u;
   (void)k;
   if (ev_n < MAX_EV)
-    ev_t[ev_n++] = CB_T_NOW(g_z);
+    ev_t[ev_n++] = CALLBACK_BUS_CYCLE_START(g_z);
   return ram[a];
 }
 
 static void write_byte(void *u, uint16_t a, uint8_t v) {
   (void)u;
   if (ev_n < MAX_EV)
-    ev_t[ev_n++] = CB_T_NOW(g_z);
+    ev_t[ev_n++] = CALLBACK_BUS_CYCLE_START(g_z);
   ram[a] = v;
 }
 
@@ -66,7 +67,7 @@ static uint8_t port_in(z80 *z, uint16_t p) {
   (void)p;
   (void)z;
   if (ev_n < MAX_EV)
-    ev_t[ev_n++] = CB_T_NOW(z);
+    ev_t[ev_n++] = CALLBACK_BUS_CYCLE_START(z);
   return 0;
 }
 
@@ -75,7 +76,7 @@ static void port_out(z80 *z, uint16_t p, uint8_t v) {
   (void)v;
   (void)z;
   if (ev_n < MAX_EV)
-    ev_t[ev_n++] = CB_T_NOW(z);
+    ev_t[ev_n++] = CALLBACK_BUS_CYCLE_START(z);
 }
 
 static int failures;
@@ -121,12 +122,12 @@ static unsigned t_before, c_before;
 static void begin_step(z80 *z) {
   ev_n = 0;
   g_z = z;
-  t_before = CUR_T(z);
+  t_before = READ_T_COUNTER(z);
   c_before = z->cyc;
 }
 
 static void end_step(const char *label, z80 *z) {
-  unsigned dt = CUR_T(z) - t_before;
+  unsigned dt = READ_T_COUNTER(z) - t_before;
   unsigned dc = z->cyc - c_before;
   if (dt != dc) {
     printf("FAIL %s: bus plus internal T is %u, generic cost is %u\n", label, dt, dc);
