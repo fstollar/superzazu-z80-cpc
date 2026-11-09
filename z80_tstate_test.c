@@ -47,32 +47,32 @@
 #endif
 
 static uint8_t ram[0x10000];
-static z80 *g_z;
+static z80 *active_cpu;
 
-#define MAX_EV 128
-static unsigned ev_t[MAX_EV];
-static unsigned ev_n;
+#define MAX_EVENTS 128
+static unsigned event_start[MAX_EVENTS];
+static unsigned event_count;
 
 static uint8_t read_byte(void *u, uint16_t a, z80_read_kind_t k) {
   (void)u;
   (void)k;
-  if (ev_n < MAX_EV)
-    ev_t[ev_n++] = CALLBACK_BUS_CYCLE_START(g_z);
+  if (event_count < MAX_EVENTS)
+    event_start[event_count++] = CALLBACK_BUS_CYCLE_START(active_cpu);
   return ram[a];
 }
 
 static void write_byte(void *u, uint16_t a, uint8_t v) {
   (void)u;
-  if (ev_n < MAX_EV)
-    ev_t[ev_n++] = CALLBACK_BUS_CYCLE_START(g_z);
+  if (event_count < MAX_EVENTS)
+    event_start[event_count++] = CALLBACK_BUS_CYCLE_START(active_cpu);
   ram[a] = v;
 }
 
 static uint8_t port_in(z80 *z, uint16_t p) {
   (void)p;
   (void)z;
-  if (ev_n < MAX_EV)
-    ev_t[ev_n++] = CALLBACK_BUS_CYCLE_START(z);
+  if (event_count < MAX_EVENTS)
+    event_start[event_count++] = CALLBACK_BUS_CYCLE_START(z);
   return 0;
 }
 
@@ -80,8 +80,8 @@ static void port_out(z80 *z, uint16_t p, uint8_t v) {
   (void)p;
   (void)v;
   (void)z;
-  if (ev_n < MAX_EV)
-    ev_t[ev_n++] = CALLBACK_BUS_CYCLE_START(z);
+  if (event_count < MAX_EVENTS)
+    event_start[event_count++] = CALLBACK_BUS_CYCLE_START(z);
 }
 
 static int failures;
@@ -122,44 +122,44 @@ static void set_base(z80 *z) {
   z->im0_active = 0;
 }
 
-static unsigned t_before, c_before;
+static unsigned t_counter_before, cyc_before;
 
 static void begin_step(z80 *z) {
-  ev_n = 0;
-  g_z = z;
-  t_before = READ_T_COUNTER(z);
-  c_before = z->cyc;
+  event_count = 0;
+  active_cpu = z;
+  t_counter_before = READ_T_COUNTER(z);
+  cyc_before = z->cyc;
 }
 
 static void end_step(const char *label, z80 *z) {
-  unsigned dt = READ_T_COUNTER(z) - t_before;
-  unsigned dc = z->cyc - c_before;
-  if (dt != dc) {
-    printf("FAIL %s: bus plus internal T is %u, generic cost is %u\n", label, dt, dc);
+  unsigned delta_t = READ_T_COUNTER(z) - t_counter_before;
+  unsigned delta_cyc = z->cyc - cyc_before;
+  if (delta_t != delta_cyc) {
+    printf("FAIL %s: bus plus internal T is %u, generic cost is %u\n", label, delta_t, delta_cyc);
     ++failures;
   }
 #if CHECK_BUS_TIMES
-  if (ev_n == 0) {
+  if (event_count == 0) {
     printf("FAIL %s: no bus callbacks recorded\n", label);
     ++failures;
     return;
   }
-  for (unsigned i = 0; i < ev_n; ++i) {
-    if (ev_t[i] >= dt) {
-      printf("FAIL %s: bus start T %u outside the step (total %u)\n", label, ev_t[i], dt);
+  for (unsigned i = 0; i < event_count; ++i) {
+    if (event_start[i] >= delta_t) {
+      printf("FAIL %s: bus start T %u outside the step (total %u)\n", label, event_start[i], delta_t);
       ++failures;
       break;
     }
     if (i > 0) {
-      if (ev_t[i] < ev_t[i - 1]) {
-        printf("FAIL %s: bus start T %u before previous %u\n", label, ev_t[i], ev_t[i - 1]);
+      if (event_start[i] < event_start[i - 1]) {
+        printf("FAIL %s: bus start T %u before previous %u\n", label, event_start[i], event_start[i - 1]);
         ++failures;
         break;
       }
       /* Every bus cycle holds the bus for at least 3 T, so two callbacks
          can never start closer together than that. */
-      if (ev_t[i] - ev_t[i - 1] < 3) {
-        printf("FAIL %s: bus starts %u and %u less than 3 T apart\n", label, ev_t[i - 1], ev_t[i]);
+      if (event_start[i] - event_start[i - 1] < 3) {
+        printf("FAIL %s: bus starts %u and %u less than 3 T apart\n", label, event_start[i - 1], event_start[i]);
         ++failures;
         break;
       }
@@ -167,8 +167,8 @@ static void end_step(const char *label, z80 *z) {
   }
   /* The last cycle runs at least 3 T past its start, so it must still
      end within the step. */
-  if (ev_n > 0 && ev_t[ev_n - 1] + 3 > dt) {
-    printf("FAIL %s: last bus start T %u ends past the step (total %u)\n", label, ev_t[ev_n - 1], dt);
+  if (event_count > 0 && event_start[event_count - 1] + 3 > delta_t) {
+    printf("FAIL %s: last bus start T %u ends past the step (total %u)\n", label, event_start[event_count - 1], delta_t);
     ++failures;
   }
 #else
@@ -190,14 +190,14 @@ static void check_pc(const char *label, z80 *z, uint16_t want) {
    ops, the per-T bus traces in the SingleStepTests subset. */
 static void check_seq(const char *label, const unsigned *want, unsigned n) {
 #if CHECK_BUS_TIMES
-  if (ev_n != n) {
-    printf("FAIL %s: %u bus events, want %u\n", label, ev_n, n);
+  if (event_count != n) {
+    printf("FAIL %s: %u bus events, want %u\n", label, event_count, n);
     ++failures;
     return;
   }
   for (unsigned i = 0; i < n; ++i) {
-    if (ev_t[i] != want[i]) {
-      printf("FAIL %s: event %u starts at %u, want %u\n", label, i, ev_t[i], want[i]);
+    if (event_start[i] != want[i]) {
+      printf("FAIL %s: event %u starts at %u, want %u\n", label, i, event_start[i], want[i]);
       ++failures;
     }
   }
@@ -333,8 +333,8 @@ static void cond_case(const char *label, uint8_t op, const uint8_t *extra, int e
 
 static void cond_cases(void) {
   /* JR cc,d with d = 4: taken lands at 0x1006, not taken at 0x1002. */
-  const uint8_t d4[1] = {0x04};
-  static const struct { uint8_t op; int taken; int not_taken; } jrs[] = {
+  const uint8_t disp_plus4[1] = {0x04};
+  static const struct { uint8_t op; int taken; int not_taken; } jr_cases[] = {
     {0x20, 0, 1}, /* nz: taken with zf clear */
     {0x28, 1, 0}, /* z: taken with zf set */
     {0x30, 0, 2}, /* nc: taken with cf clear */
@@ -343,11 +343,11 @@ static void cond_cases(void) {
   for (unsigned i = 0; i < 4; ++i) {
     char label[40];
     static const unsigned jr_seq[] = {0, 4};
-    snprintf(label, sizeof(label), "jr %02X taken", jrs[i].op);
-    cond_case(label, jrs[i].op, d4, 1, jrs[i].taken, 0x1006, 0xF000);
+    snprintf(label, sizeof(label), "jr %02X taken", jr_cases[i].op);
+    cond_case(label, jr_cases[i].op, disp_plus4, 1, jr_cases[i].taken, 0x1006, 0xF000);
     check_seq(label, jr_seq, 2);
-    snprintf(label, sizeof(label), "jr %02X not taken", jrs[i].op);
-    cond_case(label, jrs[i].op, d4, 1, jrs[i].not_taken, 0x1002, 0xF000);
+    snprintf(label, sizeof(label), "jr %02X not taken", jr_cases[i].op);
+    cond_case(label, jr_cases[i].op, disp_plus4, 1, jr_cases[i].not_taken, 0x1002, 0xF000);
     check_seq(label, jr_seq, 2);
   }
   /* DJNZ *,d: taken while B - 1 is not 0. */
@@ -381,7 +381,7 @@ static void cond_cases(void) {
      odd conditions (z, c, pe, m) and clears it for the even ones
      (nz, nc, po, p). */
   const uint8_t nn[2] = {0x00, 0x20};
-  static const struct { uint8_t jp, call, ret; int bit; int odd; } ccs[] = {
+  static const struct { uint8_t jp, call, ret; int bit; int odd; } cond_branches[] = {
     {0xC2, 0xC4, 0xC0, 0, 0}, {0xCA, 0xCC, 0xC8, 0, 1},
     {0xD2, 0xD4, 0xD0, 1, 0}, {0xDA, 0xDC, 0xD8, 1, 1},
     {0xE2, 0xE4, 0xE0, 2, 0}, {0xEA, 0xEC, 0xE8, 2, 1},
@@ -393,26 +393,26 @@ static void cond_cases(void) {
     static const unsigned call_skipped[] = {0, 4, 7};
     static const unsigned ret_taken[] = {0, 4, 7};
     static const unsigned ret_skipped[] = {0};
-    int hold = 1 << ccs[i].bit;
-    int taken = ccs[i].odd ? hold : 0;
-    int skipped = ccs[i].odd ? 0 : hold;
-    snprintf(label, sizeof(label), "jp %02X taken", ccs[i].jp);
-    cond_case(label, ccs[i].jp, nn, 2, taken, 0x2000, 0xF000);
-    snprintf(label, sizeof(label), "jp %02X not taken", ccs[i].jp);
-    cond_case(label, ccs[i].jp, nn, 2, skipped, 0x1003, 0xF000);
-    snprintf(label, sizeof(label), "call %02X taken", ccs[i].call);
-    cond_case(label, ccs[i].call, nn, 2, taken, 0x2000, 0xEFFE);
+    int hold = 1 << cond_branches[i].bit;
+    int taken = cond_branches[i].odd ? hold : 0;
+    int skipped = cond_branches[i].odd ? 0 : hold;
+    snprintf(label, sizeof(label), "jp %02X taken", cond_branches[i].jp);
+    cond_case(label, cond_branches[i].jp, nn, 2, taken, 0x2000, 0xF000);
+    snprintf(label, sizeof(label), "jp %02X not taken", cond_branches[i].jp);
+    cond_case(label, cond_branches[i].jp, nn, 2, skipped, 0x1003, 0xF000);
+    snprintf(label, sizeof(label), "call %02X taken", cond_branches[i].call);
+    cond_case(label, cond_branches[i].call, nn, 2, taken, 0x2000, 0xEFFE);
     check_seq(label, call_taken, 5);
-    snprintf(label, sizeof(label), "call %02X not taken", ccs[i].call);
-    cond_case(label, ccs[i].call, nn, 2, skipped, 0x1003, 0xF000);
+    snprintf(label, sizeof(label), "call %02X not taken", cond_branches[i].call);
+    cond_case(label, cond_branches[i].call, nn, 2, skipped, 0x1003, 0xF000);
     check_seq(label, call_skipped, 3);
     /* RET pops 0x2000 off the stack when taken; the stack is set after
        the base setup wipes memory. */
-    snprintf(label, sizeof(label), "ret %02X taken", ccs[i].ret);
+    snprintf(label, sizeof(label), "ret %02X taken", cond_branches[i].ret);
     {
       z80 z;
       set_base(&z);
-      uint8_t b[1] = {ccs[i].ret};
+      uint8_t b[1] = {cond_branches[i].ret};
       load_bytes(b, 1);
       ram[0xF000] = 0x00;
       ram[0xF001] = 0x20;
@@ -431,8 +431,8 @@ static void cond_cases(void) {
         ++failures;
       }
     }
-    snprintf(label, sizeof(label), "ret %02X not taken", ccs[i].ret);
-    cond_case(label, ccs[i].ret, 0, 0, skipped, 0x1001, 0xF000);
+    snprintf(label, sizeof(label), "ret %02X not taken", cond_branches[i].ret);
+    cond_case(label, cond_branches[i].ret, 0, 0, skipped, 0x1001, 0xF000);
     check_seq(label, ret_skipped, 1);
   }
 }
