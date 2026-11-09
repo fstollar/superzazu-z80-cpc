@@ -6,6 +6,26 @@
 #include <stdbool.h>
 #include "z80_timing.h"
 
+// Half-T strobe edges (Q2): the Z80 drives and samples its bus strobes on
+// its own clock edges, so every edge below lands on a half-T boundary
+// (125 ns at 4 MHz, two half-T per T). Offsets are half-T counts from the
+// bus cycle's start T, before any WAIT stretching. The sample T per cycle
+// kind is the ACCC's (1.9 §4.4.4 p.26: opcode fetch and memory sample in
+// T2, port in T3); the CLK H/L halves of diagrams A-C (p.28-29) put the
+// /WAIT sample at the falling edge and the read-data latch at the rising
+// edge that ends the sample T. The board (13.21, 16 MHz: two master ticks
+// per half-T) adds an offset to a cycle's start T to reach the edge's
+// tick. Output-strobe windows (/MREQ, /IORQ, /RD, /WR fall and rise) are
+// analogue delays, not clock edges, so they stay out of this half-T grid;
+// their per-T active phases are the operation rows of diagrams A-C.
+enum {
+  Z80_HALF_T_PER_T = 2, // half-T (Z80 clock halves) per T-state
+  Z80_STROBE_WAIT_M1 = 3, // /WAIT sample: clock fall in T2 (M1, memory)
+  Z80_STROBE_WAIT_PORT = 5, // /WAIT sample: clock fall in T3 (port, auto Tw)
+  Z80_STROBE_DATA_M1 = 4, // read-data latch: clock rise ending T2 (M1, memory)
+  Z80_STROBE_DATA_PORT = 6 // read-data latch: clock rise ending T3 (port)
+};
+
 typedef struct z80 z80;
 
 // Every memory read carries its access kind so the host can tell
@@ -58,6 +78,14 @@ struct z80 {
 
   unsigned long cyc; // cycle count (t-states)
   const z80_timing_t* timing; // NULL until z80_init() sets z80_timing_generic
+
+  unsigned long t_counter; // T-state counter: every bus cycle and every
+                           // internal stretch advances it, so one step's
+                           // bus plus internal T always equals the generic
+                           // table cost the core charges to cyc above.
+  unsigned long bus_cycle_start; // absolute T of the bus cycle now running;
+                                 // valid inside each bus callback (read,
+                                 // write, port, im0 follow-on).
 
   uint16_t pc, sp, ix, iy; // special purpose registers
   uint16_t mem_ptr; // "wz" register

@@ -8,11 +8,24 @@
 
 static inline uint8_t rb(z80* const z, uint16_t addr) {
   // data -- every HL/BC/DE/IX+d/nn operand, stack pop,
-  // ex (sp),hl and block-op byte.
+  // ex (sp),hl and block-op byte. A data read holds the bus for 3 T.
+  z->bus_cycle_start = z->t_counter;
+  z->t_counter += 3;
   return z->read_byte(z->userdata, addr, Z80_READ_DATA);
 }
 
+// vector-table read during IM2 acknowledge: the same 3 T bus cycle as
+// rb() above, tagged so the host can tell it apart.
+static inline uint8_t rb_im2(z80* const z, uint16_t addr) {
+  z->bus_cycle_start = z->t_counter;
+  z->t_counter += 3;
+  return z->read_byte(z->userdata, addr, Z80_READ_IM2_VECTOR);
+}
+
 static inline void wb(z80* const z, uint16_t addr, uint8_t val) {
+  // A data write holds the bus for 3 T, like a data read.
+  z->bus_cycle_start = z->t_counter;
+  z->t_counter += 3;
   z->write_byte(z->userdata, addr, val);
 }
 
@@ -20,14 +33,14 @@ static inline uint16_t rw(z80* const z, uint16_t addr) {
   // data -- 16-bit form of rb() above (stack pops, ld hl,(nn)).
   // Low byte first, as the Z80 bus does, sequenced explicitly: the old
   // single expression left the two hook calls unsequenced.
-  const uint8_t lo = z->read_byte(z->userdata, addr, Z80_READ_DATA);
-  const uint8_t hi = z->read_byte(z->userdata, addr + 1, Z80_READ_DATA);
+  const uint8_t lo = rb(z, addr);
+  const uint8_t hi = rb(z, addr + 1);
   return (uint16_t)((hi << 8) | lo);
 }
 
 static inline void ww(z80* const z, uint16_t addr, uint16_t val) {
-  z->write_byte(z->userdata, addr, val & 0xFF);
-  z->write_byte(z->userdata, addr + 1, val >> 8);
+  wb(z, addr, val & 0xFF);
+  wb(z, addr + 1, val >> 8);
 }
 
 static inline void pushw(z80* const z, uint16_t val) {
@@ -45,11 +58,16 @@ static inline uint8_t nextb(z80* const z) {
   // stream (ld a,n, jp nn, jr d, the d of (ix+d)). The M1 prefix/opcode
   // fetches use fetchb() instead; the DD CB d op tail (d and final op,
   // which a real Z80 reads as non-M1 cycles) deliberately stays here.
+  // An operand read holds the bus for 3 T.
   if (z->im0_active) {
     // IM 0: operand bytes are normal memory reads at the frozen PC.
+    z->bus_cycle_start = z->t_counter;
+    z->t_counter += 3;
     return z->im0_bus ? z->im0_bus(z, z->pc, Z80_IM0_READ)
                       : z->read_byte(z->userdata, z->pc, Z80_READ_OPERAND);
   }
+  z->bus_cycle_start = z->t_counter;
+  z->t_counter += 3;
   return z->read_byte(z->userdata, z->pc++, Z80_READ_OPERAND);
 }
 
@@ -59,32 +77,62 @@ static inline uint16_t nextw(z80* const z) {
   // (matching rw()'s bus order), sequenced explicitly.
   if (z->im0_active) {
     // IM 0: both bytes are read at the frozen PC, low byte first.
+    z->bus_cycle_start = z->t_counter;
+    z->t_counter += 3;
     const uint8_t lo = z->im0_bus
         ? z->im0_bus(z, z->pc, Z80_IM0_READ)
         : z->read_byte(z->userdata, z->pc, Z80_READ_OPERAND);
+    z->bus_cycle_start = z->t_counter;
+    z->t_counter += 3;
     const uint8_t hi = z->im0_bus
         ? z->im0_bus(z, z->pc, Z80_IM0_READ)
         : z->read_byte(z->userdata, z->pc, Z80_READ_OPERAND);
     return (uint16_t)((hi << 8) | lo);
   }
-  const uint16_t addr = z->pc;
-  z->pc += 2;
-  const uint8_t lo = z->read_byte(z->userdata, addr, Z80_READ_OPERAND);
-  const uint8_t hi = z->read_byte(z->userdata, addr + 1, Z80_READ_OPERAND);
+  const uint8_t lo = nextb(z);
+  const uint8_t hi = nextb(z);
   return (uint16_t)((hi << 8) | lo);
 }
 
 // M1 -- opcode fetch including each CB/ED/DD/FD prefix byte.
 // Separate from nextb() so the host can tell fetches (never checked) apart
 // from operand bytes (also never checked, but a distinct kind).
+// An M1 fetch holds the bus for 4 T.
 static inline uint8_t fetchb(z80* const z) {
   if (z->im0_active) {
     // IM 0: a follow-on opcode byte after a prefix is another INTA-style M1
-    // cycle -- no PC increment, and it carries the acknowledge overhead.
+    // cycle -- no PC increment. It runs no host memory callback, but its
+    // acknowledge overhead still takes its T count.
+    z->bus_cycle_start = z->t_counter;
+    z->t_counter += z->timing->int_ack_im0;
     z->cyc += z->timing->int_ack_im0;
     return z->im0_bus ? z->im0_bus(z, z->pc, Z80_IM0_INTA) : 0xFF;
   }
+  z->bus_cycle_start = z->t_counter;
+  z->t_counter += 4;
   return z->read_byte(z->userdata, z->pc++, Z80_READ_M1);
+}
+
+// A port access holds the bus for 4 T (3 bus T plus the automatic wait T).
+static inline uint8_t port_rd(z80* const z, uint16_t port) {
+  z->bus_cycle_start = z->t_counter;
+  z->t_counter += 4;
+  return z->port_in(z, port);
+}
+
+static inline void port_wr(z80* const z, uint16_t port, uint8_t val) {
+  z->bus_cycle_start = z->t_counter;
+  z->t_counter += 4;
+  z->port_out(z, port, val);
+}
+
+// Advances the T counter over internal (non-bus) T-states, which run with
+// no host callback. The bus helpers above advance it per bus cycle instead,
+// so one step's bus plus internal T always equals the generic table cost
+// the core charges to cyc. Amounts below are plain T counts for the default
+// generic table.
+static inline void internal(z80* const z, unsigned n) {
+  z->t_counter += n;
 }
 
 static inline uint16_t get_bc(z80* const z) {
@@ -193,8 +241,12 @@ static inline void cond_jump(z80* const z, bool condition) {
   z->mem_ptr = addr;
 }
 
-// calls to next word in memory
+// calls to next word in memory. The call closes its M3 with one internal
+// T (the pushed address is settled) ahead of the two stack writes; RST,
+// taken CALL, NMI and IM1 all share this shape (IM2 reads its vector
+// between the internal stretch and the pushes, so it pushes directly).
 static inline void call(z80* const z, uint16_t addr) {
+  internal(z, 1);
   pushw(z, z->pc);
   z->pc = addr;
   z->mem_ptr = addr;
@@ -216,8 +268,11 @@ static inline void ret(z80* const z) {
   z->mem_ptr = z->pc;
 }
 
-// returns from subroutine if condition is true
+// returns from subroutine if condition is true. The condition is evaluated
+// during M1, stretching the fetch itself to 5 T either way; a taken RET
+// adds the two stack reads past that.
 static inline void cond_ret(z80* const z, bool condition) {
+  internal(z, 1);
   if (condition) {
     ret(z);
     z->cyc += z->timing->cond_ret_taken_extra;
@@ -234,6 +289,7 @@ static inline void cond_jr(z80* const z, bool condition) {
   if (condition) {
     jr(z, b);
     z->cyc += z->timing->cond_jr_taken_extra;
+    internal(z, z->timing->cond_jr_taken_extra);
   }
 }
 
@@ -283,8 +339,9 @@ static inline uint16_t subw(z80* const z, uint16_t a, uint16_t b, bool cy) {
   return result;
 }
 
-// adds a word to HL
+// adds a word to HL. The 16-bit add runs 7 T past the fetch.
 static inline void addhl(z80* const z, uint16_t val) {
+  internal(z, 7);
   bool sf = z->sf;
   bool zf = z->zf;
   bool pf = z->pf;
@@ -295,8 +352,9 @@ static inline void addhl(z80* const z, uint16_t val) {
   z->pf = pf;
 }
 
-// adds a word to IX or IY
+// adds a word to IX or IY. Same 7 T tail as addhl above.
 static inline void addiz(z80* const z, uint16_t* reg, uint16_t val) {
+  internal(z, 7);
   bool sf = z->sf;
   bool zf = z->zf;
   bool pf = z->pf;
@@ -307,16 +365,18 @@ static inline void addiz(z80* const z, uint16_t* reg, uint16_t val) {
   z->pf = pf;
 }
 
-// adds a word (+ carry) to HL
+// adds a word (+ carry) to HL. Same 7 T tail as addhl above.
 static inline void adchl(z80* const z, uint16_t val) {
+  internal(z, 7);
   uint16_t result = addw(z, get_hl(z), val, z->cf);
   z->sf = result >> 15;
   z->zf = result == 0;
   set_hl(z, result);
 }
 
-// substracts a word (+ carry) to HL
+// substracts a word (+ carry) to HL. Same 7 T tail as addhl above.
 static inline void sbchl(z80* const z, uint16_t val) {
+  internal(z, 7);
   const uint16_t result = subw(z, get_hl(z), val, z->cf);
   z->sf = result >> 15;
   z->zf = result == 0;
@@ -546,6 +606,7 @@ static inline void ldi(z80* const z) {
   const uint8_t val = rb(z, hl);
 
   wb(z, de, val);
+  internal(z, 2); // the write closes with two internal T
 
   set_hl(z, get_hl(z) + 1);
   set_de(z, get_de(z) + 1);
@@ -573,6 +634,7 @@ static inline void ldd(z80* const z) {
 static inline void cpi(z80* const z) {
   bool cf = z->cf;
   const uint8_t result = subb(z, z->a, rb(z, get_hl(z)), 0);
+  internal(z, 5); // the compare runs 5 T past the (HL) read
   set_hl(z, get_hl(z) + 1);
   set_bc(z, get_bc(z) - 1);
   z->xf = GET_BIT(3, result - z->hf);
@@ -593,7 +655,7 @@ static void in_r_c(z80* const z, uint8_t* r) {
   // MEMPTR = BC + 1 for every IN r,(C), taken before r is written (IN B
   // and IN C change BC).
   z->mem_ptr = get_bc(z) + 1;
-  *r = z->port_in(z, get_bc(z));
+  *r = port_rd(z, get_bc(z));
   z->flags_written = 1;
   z->zf = *r == 0;
   z->sf = *r >> 7;
@@ -605,8 +667,10 @@ static void in_r_c(z80* const z, uint8_t* r) {
 static void ini(z80* const z) {
   // MEMPTR comes from BC as it was before B is decremented
   // (memptr_eng.txt: INI MEMPTR = BC_before_decrementing_B + 1).
+  // The second fetch closes with one internal T ahead of the port read.
+  internal(z, 1);
   uint16_t bc_before = get_bc(z);
-  uint8_t val = z->port_in(z, bc_before);
+  uint8_t val = port_rd(z, bc_before);
   wb(z, get_hl(z), val);
   set_hl(z, get_hl(z) + 1);
   z->b -= 1;
@@ -629,9 +693,11 @@ static void outi(z80* const z) {
   // carries the decremented B (unlike INI/IND, which use BC before the
   // decrement). The Amstrad CPC compendium relies on this: CPC code loads
   // B with the port's high byte + 1 before OUTI/OUTD.
+  // The second fetch closes with one internal T ahead of the (HL) read.
+  internal(z, 1);
   uint8_t val = rb(z, get_hl(z));
   z->b -= 1;
-  z->port_out(z, get_bc(z), val);
+  port_wr(z, get_bc(z), val);
   set_hl(z, get_hl(z) + 1);
   z->flags_written = 1;
   z->zf = z->b == 0;
@@ -699,6 +765,9 @@ static inline void process_interrupts(z80* const z) {
     q_clear(z);
     inc_r(z);
 
+    // The acknowledge answers with no bus callback of its own; call()
+    // carries one of its internal T, the rest runs here up front.
+    internal(z, 4);
     z->cyc += z->timing->nmi_ack;
     call(z, 0x66);
     return;
@@ -731,8 +800,13 @@ static inline void process_interrupts(z80* const z) {
       // frozen at its pre-interrupt value for the whole instruction; bytes
       // after the first come from im0_bus (or the defaults). R is refreshed
       // once per M1 by exec_opcode and the prefix handlers.
+      //
+      // The INTA cycle and the off-bus first byte run with no host
+      // callback; the instruction body then accounts for the rest.
+      internal(z, z->timing->int_ack_im0);
       z->cyc += z->timing->int_ack_im0;
       z->im0_active = 1;
+      internal(z, 4);
       q_clear(z);
       exec_opcode(z, z->int_data);
       z->im0_active = 0;
@@ -740,12 +814,21 @@ static inline void process_interrupts(z80* const z) {
 
     case 1:
       inc_r(z);
+      // Same shape as NMI above: no callback of its own, one internal T
+      // in call(), the rest up front.
+      internal(z, 6);
       z->cyc += z->timing->int_ack_im1;
       call(z, 0x38);
       break;
 
     case 2: {
       inc_r(z);
+      // The whole acknowledge answers with no callback of its own: seven
+      // internal T up front, then the two vector-table reads back to
+      // back, then the two stack pushes back to back. call() is not
+      // reused here: its internal T sits ahead of the pushes, but the
+      // vector reads come between the two.
+      internal(z, 7);
       z->cyc += z->timing->int_ack_im2;
       // Real Z80 hardware quirk: the jump address's high byte is read from
       // I<<8|(int_data+1), wrapping within the *same* page when int_data is
@@ -756,9 +839,12 @@ static inline void process_interrupts(z80* const z) {
       // im2_vector -- the two IM2 vector-table reads. Low byte
       // first, as the Z80 bus does, sequenced explicitly: the old single
       // expression left the two rb() calls unsequenced.
-      const uint8_t vec_lo = z->read_byte(z->userdata, addr_lo, Z80_READ_IM2_VECTOR);
-      const uint8_t vec_hi = z->read_byte(z->userdata, addr_hi, Z80_READ_IM2_VECTOR);
-      call(z, (uint16_t)(vec_hi << 8) | vec_lo);
+      const uint8_t vec_lo = rb_im2(z, addr_lo);
+      const uint8_t vec_hi = rb_im2(z, addr_hi);
+      const uint16_t vec = (uint16_t)(vec_hi << 8) | vec_lo;
+      pushw(z, z->pc);
+      z->pc = vec;
+      z->mem_ptr = vec;
       break;
     }
 
@@ -785,6 +871,8 @@ void z80_init(z80* const z) {
   z->userdata = NULL;
 
   z->cyc = 0;
+  z->t_counter = 0;
+  z->bus_cycle_start = 0;
   z->timing = &z80_timing_generic;
 
   z->pc = 0;
@@ -841,6 +929,9 @@ void z80_step(z80* const z) {
   z->iff_delay = 0;
   z->flags_written = 0;
   if (z->halted) {
+    // A halted CPU keeps fetching NOPs with no bus-visible advance here
+    // (no fetch is issued on this path); the 4 T run internal.
+    internal(z, 4);
     exec_opcode(z, 0x00);
   } else {
     const uint8_t opcode = fetchb(z); // M1 opcode fetch
@@ -1018,7 +1109,8 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     z->mem_ptr = addr + 1;
   } break; // ld (**),hl
 
-  case 0xF9: z->sp = get_hl(z); break; // ld sp,hl
+  // ld sp,hl runs 2 T past its fetch, like inc/dec qq above.
+  case 0xF9: internal(z, 2); z->sp = get_hl(z); break; // ld sp,hl
 
   case 0xEB: {
     const uint16_t de = get_de(z);
@@ -1027,8 +1119,12 @@ void exec_opcode(z80* const z, uint8_t opcode) {
   } break; // ex de,hl
 
   case 0xE3: {
+    // The two stack reads run back to back; one internal T turns the bus
+    // around to the two writes, which close with two trailing internal T.
     const uint16_t val = rw(z, z->sp);
+    internal(z, 1);
     ww(z, z->sp, get_hl(z));
+    internal(z, 2);
     set_hl(z, val);
     z->mem_ptr = val;
   } break; // ex (sp),hl
@@ -1098,7 +1194,9 @@ void exec_opcode(z80* const z, uint8_t opcode) {
   case 0x24: z->h = inc(z, z->h); break; // inc h
   case 0x2C: z->l = inc(z, z->l); break; // inc l
   case 0x34: {
+    // The modify runs between the read and the write (one internal T).
     uint8_t result = inc(z, rb(z, get_hl(z)));
+    internal(z, 1);
     wb(z, get_hl(z), result);
   } break; // inc (hl)
 
@@ -1110,19 +1208,22 @@ void exec_opcode(z80* const z, uint8_t opcode) {
   case 0x25: z->h = dec(z, z->h); break; // dec h
   case 0x2D: z->l = dec(z, z->l); break; // dec l
   case 0x35: {
+    // Same one internal T between read and write as inc (hl).
     uint8_t result = dec(z, rb(z, get_hl(z)));
+    internal(z, 1);
     wb(z, get_hl(z), result);
   } break; // dec (hl)
 
-  case 0x03: set_bc(z, get_bc(z) + 1); break; // inc bc
-  case 0x13: set_de(z, get_de(z) + 1); break; // inc de
-  case 0x23: set_hl(z, get_hl(z) + 1); break; // inc hl
-  case 0x33: z->sp = z->sp + 1; break; // inc sp
+  // inc/dec qq: a 6 T M1 (the 16-bit step runs past the 4 T fetch).
+  case 0x03: internal(z, 2); set_bc(z, get_bc(z) + 1); break; // inc bc
+  case 0x13: internal(z, 2); set_de(z, get_de(z) + 1); break; // inc de
+  case 0x23: internal(z, 2); set_hl(z, get_hl(z) + 1); break; // inc hl
+  case 0x33: internal(z, 2); z->sp = z->sp + 1; break; // inc sp
 
-  case 0x0B: set_bc(z, get_bc(z) - 1); break; // dec bc
-  case 0x1B: set_de(z, get_de(z) - 1); break; // dec de
-  case 0x2B: set_hl(z, get_hl(z) - 1); break; // dec hl
-  case 0x3B: z->sp = z->sp - 1; break; // dec sp
+  case 0x0B: internal(z, 2); set_bc(z, get_bc(z) - 1); break; // dec bc
+  case 0x1B: internal(z, 2); set_de(z, get_de(z) - 1); break; // dec de
+  case 0x2B: internal(z, 2); set_hl(z, get_hl(z) - 1); break; // dec hl
+  case 0x3B: internal(z, 2); z->sp = z->sp - 1; break; // dec sp
 
   case 0x27: daa(z); break; // daa
 
@@ -1250,8 +1351,16 @@ void exec_opcode(z80* const z, uint8_t opcode) {
   case 0xF2: cond_jump(z, z->sf == 0); break; // jp p, **
   case 0xFA: cond_jump(z, z->sf == 1); break; // jp m, **
 
-  case 0x10: cond_jr(z, --z->b != 0); break; // djnz *
-  case 0x18: jr(z, (int8_t) nextb(z)); break; // jr *
+  case 0x10: {
+    // The B decrement overlaps M1, stretching the fetch itself to 5 T.
+    --z->b;
+    internal(z, 1);
+    cond_jr(z, z->b != 0);
+  } break; // djnz *
+  case 0x18:
+    jr(z, (int8_t) nextb(z));
+    internal(z, 5); // taken unconditionally: same 5 T tail as a taken JR cc
+    break; // jr *
   case 0x20: cond_jr(z, z->zf == 0); break; // jr nz, *
   case 0x28: cond_jr(z, z->zf == 1); break; // jr z, *
   case 0x30: cond_jr(z, z->cf == 0); break; // jr nc, *
@@ -1288,10 +1397,11 @@ void exec_opcode(z80* const z, uint8_t opcode) {
   case 0xF7: call(z, 0x30); break; // rst 6
   case 0xFF: call(z, 0x38); break; // rst 7
 
-  case 0xC5: pushw(z, get_bc(z)); break; // push bc
-  case 0xD5: pushw(z, get_de(z)); break; // push de
-  case 0xE5: pushw(z, get_hl(z)); break; // push hl
-  case 0xF5: pushw(z, (z->a << 8) | get_f(z)); break; // push af
+  // push qq: the SP decrement overlaps M1, stretching the fetch to 5 T.
+  case 0xC5: internal(z, 1); pushw(z, get_bc(z)); break; // push bc
+  case 0xD5: internal(z, 1); pushw(z, get_de(z)); break; // push de
+  case 0xE5: internal(z, 1); pushw(z, get_hl(z)); break; // push hl
+  case 0xF5: internal(z, 1); pushw(z, (z->a << 8) | get_f(z)); break; // push af
 
   case 0xC1: set_bc(z, popw(z)); break; // pop bc
   case 0xD1: set_de(z, popw(z)); break; // pop de
@@ -1308,7 +1418,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     // instruction, not B (as it is for the ED-prefixed "in r,(c)" form).
     const uint8_t port = nextb(z);
     const uint8_t a = z->a;
-    z->a = z->port_in(z, (uint16_t)(a << 8) | port);
+    z->a = port_rd(z, (uint16_t)(a << 8) | port);
     z->mem_ptr = (uint16_t)(((a << 8) | port) + 1);
   } break; // in a,(n)
 
@@ -1316,7 +1426,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     // same quirk as above: A supplies both the upper address byte and the
     // data byte for this instruction.
     const uint8_t port = nextb(z);
-    z->port_out(z, (uint16_t)(z->a << 8) | port, z->a);
+    port_wr(z, (uint16_t)(z->a << 8) | port, z->a);
     z->mem_ptr = (port + 1) | (z->a << 8);
   } break; // out (n), a
 
@@ -1369,7 +1479,7 @@ void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
 
   switch (opcode) {
   case 0xE1: *iz = popw(z); break; // pop iz
-  case 0xE5: pushw(z, *iz); break; // push iz
+  case 0xE5: internal(z, 1); pushw(z, *iz); break; // push iz
 
   case 0xE9: z->pc = *iz; break; // jp iz (like jp (hl), MEMPTR untouched)
 
@@ -1383,43 +1493,51 @@ void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
   case 0x8C: z->a = addb(z, z->a, IZH, z->cf); break; // adc a,izh
   case 0x8D: z->a = addb(z, z->a, *iz & 0xFF, z->cf); break; // adc a,izl
 
-  case 0x86: z->a = addb(z, z->a, rb(z, IZD), 0); break; // add a,(iz+*)
-  case 0x8E: z->a = addb(z, z->a, rb(z, IZD), z->cf); break; // adc a,(iz+*)
-  case 0x96: z->a = subb(z, z->a, rb(z, IZD), 0); break; // sub (iz+*)
-  case 0x9E: z->a = subb(z, z->a, rb(z, IZD), z->cf); break; // sbc (iz+*)
+  case 0x86: z->a = addb(z, z->a, rb(z, IZD), 0); internal(z, 5); break; // add a,(iz+*)
+  case 0x8E: z->a = addb(z, z->a, rb(z, IZD), z->cf); internal(z, 5); break; // adc a,(iz+*)
+  case 0x96: z->a = subb(z, z->a, rb(z, IZD), 0); internal(z, 5); break; // sub (iz+*)
+  case 0x9E: z->a = subb(z, z->a, rb(z, IZD), z->cf); internal(z, 5); break; // sbc (iz+*)
 
   case 0x94: z->a = subb(z, z->a, IZH, 0); break; // sub izh
   case 0x95: z->a = subb(z, z->a, *iz & 0xFF, 0); break; // sub izl
   case 0x9C: z->a = subb(z, z->a, IZH, z->cf); break; // sbc izh
   case 0x9D: z->a = subb(z, z->a, *iz & 0xFF, z->cf); break; // sbc izl
 
-  case 0xA6: land(z, rb(z, IZD)); break; // and (iz+*)
+  case 0xA6: land(z, rb(z, IZD)); internal(z, 5); break; // and (iz+*)
   case 0xA4: land(z, IZH); break; // and izh
   case 0xA5: land(z, *iz & 0xFF); break; // and izl
 
-  case 0xAE: lxor(z, rb(z, IZD)); break; // xor (iz+*)
+  case 0xAE: lxor(z, rb(z, IZD)); internal(z, 5); break; // xor (iz+*)
   case 0xAC: lxor(z, IZH); break; // xor izh
   case 0xAD: lxor(z, *iz & 0xFF); break; // xor izl
 
-  case 0xB6: lor(z, rb(z, IZD)); break; // or (iz+*)
+  case 0xB6: lor(z, rb(z, IZD)); internal(z, 5); break; // or (iz+*)
   case 0xB4: lor(z, IZH); break; // or izh
   case 0xB5: lor(z, *iz & 0xFF); break; // or izl
 
-  case 0xBE: cp(z, rb(z, IZD)); break; // cp (iz+*)
+  case 0xBE: cp(z, rb(z, IZD)); internal(z, 5); break; // cp (iz+*)
   case 0xBC: cp(z, IZH); break; // cp izh
   case 0xBD: cp(z, *iz & 0xFF); break; // cp izl
 
-  case 0x23: *iz += 1; break; // inc iz
-  case 0x2B: *iz -= 1; break; // dec iz
+  // inc/dec iz run 2 T past their two fetches, like inc/dec qq.
+  case 0x23: internal(z, 2); *iz += 1; break; // inc iz
+  case 0x2B: internal(z, 2); *iz -= 1; break; // dec iz
 
   case 0x34: {
+    // Read-modify-write: the read lands in M4, the write in M6, with the
+    // modify and one extra internal T in between (4,4,3,5,4,3 shape).
     uint16_t addr = IZD;
-    wb(z, addr, inc(z, rb(z, addr)));
+    uint8_t result = inc(z, rb(z, addr));
+    internal(z, 6);
+    wb(z, addr, result);
   } break; // inc (iz+*)
 
   case 0x35: {
+    // Same read-modify-write shape as inc (iz+*) above.
     uint16_t addr = IZD;
-    wb(z, addr, dec(z, rb(z, addr)));
+    uint8_t result = dec(z, rb(z, addr));
+    internal(z, 6);
+    wb(z, addr, result);
   } break; // dec (iz+*)
 
   case 0x24: *iz = IZL | ((inc(z, IZH)) << 8); break; // inc izh
@@ -1440,25 +1558,32 @@ void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
   case 0x21: *iz = nextw(z); break; // ld iz,**
 
   case 0x36: {
+    // The n byte lands in M4 with two internal T behind it; the write
+    // closes M5 (4,4,3,5,3 shape).
     uint16_t addr = IZD;
-    wb(z, addr, nextb(z));
+    uint8_t n = nextb(z);
+    internal(z, 2);
+    wb(z, addr, n);
   } break; // ld (iz+*),*
 
-  case 0x70: wb(z, IZD, z->b); break; // ld (iz+*),b
-  case 0x71: wb(z, IZD, z->c); break; // ld (iz+*),c
-  case 0x72: wb(z, IZD, z->d); break; // ld (iz+*),d
-  case 0x73: wb(z, IZD, z->e); break; // ld (iz+*),e
-  case 0x74: wb(z, IZD, z->h); break; // ld (iz+*),h
-  case 0x75: wb(z, IZD, z->l); break; // ld (iz+*),l
-  case 0x77: wb(z, IZD, z->a); break; // ld (iz+*),a
+  // Indexed accesses land in M4 with five internal T behind them (the
+  // displacement read, the (iz+d) access and one internal T fill the
+  // 4,4,3,5,3 shape; the remaining three internal T close M5).
+  case 0x70: wb(z, IZD, z->b); internal(z, 5); break; // ld (iz+*),b
+  case 0x71: wb(z, IZD, z->c); internal(z, 5); break; // ld (iz+*),c
+  case 0x72: wb(z, IZD, z->d); internal(z, 5); break; // ld (iz+*),d
+  case 0x73: wb(z, IZD, z->e); internal(z, 5); break; // ld (iz+*),e
+  case 0x74: wb(z, IZD, z->h); internal(z, 5); break; // ld (iz+*),h
+  case 0x75: wb(z, IZD, z->l); internal(z, 5); break; // ld (iz+*),l
+  case 0x77: wb(z, IZD, z->a); internal(z, 5); break; // ld (iz+*),a
 
-  case 0x46: z->b = rb(z, IZD); break; // ld b,(iz+*)
-  case 0x4E: z->c = rb(z, IZD); break; // ld c,(iz+*)
-  case 0x56: z->d = rb(z, IZD); break; // ld d,(iz+*)
-  case 0x5E: z->e = rb(z, IZD); break; // ld e,(iz+*)
-  case 0x66: z->h = rb(z, IZD); break; // ld h,(iz+*)
-  case 0x6E: z->l = rb(z, IZD); break; // ld l,(iz+*)
-  case 0x7E: z->a = rb(z, IZD); break; // ld a,(iz+*)
+  case 0x46: z->b = rb(z, IZD); internal(z, 5); break; // ld b,(iz+*)
+  case 0x4E: z->c = rb(z, IZD); internal(z, 5); break; // ld c,(iz+*)
+  case 0x56: z->d = rb(z, IZD); internal(z, 5); break; // ld d,(iz+*)
+  case 0x5E: z->e = rb(z, IZD); internal(z, 5); break; // ld e,(iz+*)
+  case 0x66: z->h = rb(z, IZD); internal(z, 5); break; // ld h,(iz+*)
+  case 0x6E: z->l = rb(z, IZD); internal(z, 5); break; // ld l,(iz+*)
+  case 0x7E: z->a = rb(z, IZD); internal(z, 5); break; // ld a,(iz+*)
 
   case 0x44: z->b = IZH; break; // ld b,izh
   case 0x4C: z->c = IZH; break; // ld c,izh
@@ -1490,11 +1615,16 @@ void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
   case 0x6F: *iz = (IZH << 8) | z->a; break; // ld izl,a
   case 0x2E: *iz = (IZH << 8) | nextb(z); break; // ld izl,*
 
-  case 0xF9: z->sp = *iz; break; // ld sp,iz
+  // ld sp,iz runs 2 T past its two fetches, like ld sp,hl.
+  case 0xF9: internal(z, 2); z->sp = *iz; break; // ld sp,iz
 
   case 0xE3: {
+    // Same two-reads-then-two-writes shape as ex (sp),hl, one M1 later:
+    // one internal T turns the bus around, two trail the writes.
     const uint16_t val = rw(z, z->sp);
+    internal(z, 1);
     ww(z, z->sp, *iz);
+    internal(z, 2);
     *iz = val;
     z->mem_ptr = val;
   } break; // ex (sp),iz
@@ -1503,6 +1633,8 @@ void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
     uint16_t addr = IZD; // operand (d via nextb in IZD)
     uint8_t op = nextb(z); // operand -- final op despite feeding
                            // exec_opcode_dcb (a real Z80 reads it as non-M1)
+    // Two internal T sit between the op byte and the (iz+d) access.
+    internal(z, 2);
     exec_opcode_dcb(z, op, addr);
   } break;
 
@@ -1572,14 +1704,22 @@ void exec_opcode_cb(z80* const z, uint8_t opcode) {
   }
 
   // BIT n,(HL) only reads; every other CB operation on (HL) writes back.
-  if (reg == &hl && x_ != 1) {
-    wb(z, get_hl(z), hl);
+  // BIT n,(HL) only reads; every other CB operation on (HL) writes back.
+  // The write (or the trailing internal T of BIT) runs one T past the read.
+  if (reg == &hl) {
+    internal(z, 1);
+    if (x_ != 1) {
+      wb(z, get_hl(z), hl);
+    }
   }
 }
 
 // executes a displaced CB opcode (DDCB or FDCB)
 void exec_opcode_dcb(z80* const z, uint8_t opcode, uint16_t addr) {
   uint8_t val = rb(z, addr);
+  // One internal T sits between the (IX+d) read and whatever follows it
+  // (the write, or the instruction end for BIT).
+  internal(z, 1);
   uint8_t result = 0;
 
   // decoding instructions from http://z80.info/decoding.htm#ddcb
@@ -1642,10 +1782,12 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
   z->cyc += z->timing->cyc_ed[opcode];
   inc_r(z);
   switch (opcode) {
-  case 0x47: z->i = z->a; break; // ld i,a
-  case 0x4F: z->r = z->a; break; // ld r,a
+  // ld i/r,a and ld a,i/r run one T past their two fetches.
+  case 0x47: internal(z, 1); z->i = z->a; break; // ld i,a
+  case 0x4F: internal(z, 1); z->r = z->a; break; // ld r,a
 
   case 0x57:
+    internal(z, 1);
     z->a = z->i;
     z->sf = z->a >> 7;
     z->zf = z->a == 0;
@@ -1658,6 +1800,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     break; // ld a,i
 
   case 0x5F:
+    internal(z, 1);
     z->a = z->r;
     z->sf = z->a >> 7;
     z->zf = z->a == 0;
@@ -1691,6 +1834,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     if (get_bc(z) != 0) {
       z->pc -= 2;
       z->cyc += z->timing->block_repeat_extra;
+      internal(z, z->timing->block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
   } break; // ldir
@@ -1702,6 +1846,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     if (get_bc(z) != 0) {
       z->pc -= 2;
       z->cyc += z->timing->block_repeat_extra;
+      internal(z, z->timing->block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
   } break; // lddr
@@ -1713,6 +1858,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     if (get_bc(z) != 0 && !z->zf) {
       z->pc -= 2;
       z->cyc += z->timing->cpir_cpdr_repeat_extra;
+      internal(z, z->timing->cpir_cpdr_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
   } break; // cpir
@@ -1721,6 +1867,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     if (get_bc(z) != 0 && !z->zf) {
       z->pc -= 2;
       z->cyc += z->timing->cpir_cpdr_repeat_extra;
+      internal(z, z->timing->cpir_cpdr_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
   } break; // cpdr
@@ -1745,6 +1892,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     if (z->b > 0) {
       z->pc -= 2;
       z->cyc += z->timing->block_repeat_extra;
+      internal(z, z->timing->block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
     break; // inir
@@ -1754,40 +1902,41 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     if (z->b > 0) {
       z->pc -= 2;
       z->cyc += z->timing->block_repeat_extra;
+      internal(z, z->timing->block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
     break; // indr
 
   case 0x41:
-    z->port_out(z, get_bc(z), z->b);
+    port_wr(z, get_bc(z), z->b);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), b
   case 0x49:
-    z->port_out(z, get_bc(z), z->c);
+    port_wr(z, get_bc(z), z->c);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), c
   case 0x51:
-    z->port_out(z, get_bc(z), z->d);
+    port_wr(z, get_bc(z), z->d);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), d
   case 0x59:
-    z->port_out(z, get_bc(z), z->e);
+    port_wr(z, get_bc(z), z->e);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), e
   case 0x61:
-    z->port_out(z, get_bc(z), z->h);
+    port_wr(z, get_bc(z), z->h);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), h
   case 0x69:
-    z->port_out(z, get_bc(z), z->l);
+    port_wr(z, get_bc(z), z->l);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), l
   case 0x71:
-    z->port_out(z, get_bc(z), 0);
+    port_wr(z, get_bc(z), 0);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), 0
   case 0x79:
-    z->port_out(z, get_bc(z), z->a);
+    port_wr(z, get_bc(z), z->a);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), a
 
@@ -1797,6 +1946,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     if (z->b > 0) {
       z->pc -= 2;
       z->cyc += z->timing->block_repeat_extra;
+      internal(z, z->timing->block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
   } break; // otir
@@ -1806,6 +1956,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     if (z->b > 0) {
       z->pc -= 2;
       z->cyc += z->timing->block_repeat_extra;
+      internal(z, z->timing->block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
   } break; // otdr
@@ -1890,6 +2041,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
   case 0x67: {
     uint8_t a = z->a;
     uint8_t val = rb(z, get_hl(z));
+    internal(z, 4); // the digit shuffle runs between the read and the write
     z->a = (a & 0xF0) | (val & 0xF);
     wb(z, get_hl(z), (val >> 4) | (a << 4));
 
@@ -1907,6 +2059,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
   case 0x6F: {
     uint8_t a = z->a;
     uint8_t val = rb(z, get_hl(z));
+    internal(z, 4); // same read/shuffle/write shape as rrd above
     z->a = (a & 0xF0) | (val >> 4);
     wb(z, get_hl(z), (val << 4) | (a & 0xF));
 
