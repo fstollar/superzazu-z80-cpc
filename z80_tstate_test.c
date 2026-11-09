@@ -53,35 +53,35 @@ static z80 *active_cpu;
 static unsigned event_start[MAX_EVENTS];
 static unsigned event_count;
 
-static uint8_t read_byte(void *u, uint16_t a, z80_read_kind_t k) {
-  (void)u;
-  (void)k;
+static uint8_t read_byte(void *user_data, uint16_t addr, z80_read_kind_t kind) {
+  (void)user_data;
+  (void)kind;
   if (event_count < MAX_EVENTS)
     event_start[event_count++] = CALLBACK_BUS_CYCLE_START(active_cpu);
-  return ram[a];
+  return ram[addr];
 }
 
-static void write_byte(void *u, uint16_t a, uint8_t v) {
-  (void)u;
+static void write_byte(void *user_data, uint16_t addr, uint8_t value) {
+  (void)user_data;
   if (event_count < MAX_EVENTS)
     event_start[event_count++] = CALLBACK_BUS_CYCLE_START(active_cpu);
-  ram[a] = v;
+  ram[addr] = value;
 }
 
-static uint8_t port_in(z80 *z, uint16_t p) {
-  (void)p;
-  (void)z;
+static uint8_t port_in(z80 *cpu, uint16_t port) {
+  (void)port;
+  (void)cpu;
   if (event_count < MAX_EVENTS)
-    event_start[event_count++] = CALLBACK_BUS_CYCLE_START(z);
+    event_start[event_count++] = CALLBACK_BUS_CYCLE_START(cpu);
   return 0;
 }
 
-static void port_out(z80 *z, uint16_t p, uint8_t v) {
-  (void)p;
-  (void)v;
-  (void)z;
+static void port_out(z80 *cpu, uint16_t port, uint8_t value) {
+  (void)port;
+  (void)value;
+  (void)cpu;
   if (event_count < MAX_EVENTS)
-    event_start[event_count++] = CALLBACK_BUS_CYCLE_START(z);
+    event_start[event_count++] = CALLBACK_BUS_CYCLE_START(cpu);
 }
 
 static int failures;
@@ -628,23 +628,26 @@ static void ix_d_n_case(void) {
   }
 }
 
-/* kind: 0 = NMI, 1 = IM0, 2 = IM1, 3 = IM2. A NOP runs first, then the
-   acknowledge; the IM0 byte is a NOP so nothing else executes. Rows
-   start with the NOP's 4 T fetch; the acknowledge response itself emits
-   no callback (the first byte comes from z80_gen_int), then come the
-   stack pushes and, for IM2, the two vector-table reads. */
-static void ack_case(const char *label, int kind, uint16_t want_pc,
+/* The acknowledge modes the test drives: NMI, IM0, IM1, IM2. A NOP runs
+   first, then the acknowledge; the IM0 byte is a NOP so nothing else
+   executes. Rows start with the NOP's 4 T fetch; the acknowledge
+   response itself emits no callback (the first byte comes from
+   z80_gen_int), then come the stack pushes and, for IM2, the two
+   vector-table reads. */
+enum ack_kind { ACK_NMI, ACK_IM0, ACK_IM1, ACK_IM2 };
+
+static void ack_case(const char *label, enum ack_kind kind, uint16_t want_pc,
                      const int *rows, unsigned nrows) {
   z80 z;
   set_base(&z);
   z.iff1 = 1;
   uint8_t b[1] = {0x00};
   load_bytes(b, 1);
-  if (kind == 0) {
+  if (kind == ACK_NMI) {
     z80_gen_nmi(&z);
   } else {
-    z.interrupt_mode = (uint8_t)(kind == 1 ? 0 : kind == 2 ? 1 : 2);
-    if (kind == 3) {
+    z.interrupt_mode = (uint8_t)(kind == ACK_IM0 ? 0 : kind == ACK_IM1 ? 1 : 2);
+    if (kind == ACK_IM2) {
       z.i = 0x12;
       ram[0x1234] = 0x78;
       ram[0x1235] = 0x56;
@@ -670,10 +673,10 @@ static void ack_cases(void) {
   static const int im0_rows[] = {4, -2, -4};
   static const int im1_rows[] = {4, -7, 3, 3};
   static const int im2_rows[] = {4, -7, 3, 3, 3, 3};
-  ack_case("nmi", 0, 0x0066, nmi_rows, 4);
-  ack_case("im0", 1, 0x1001, im0_rows, 3);
-  ack_case("im1", 2, 0x0038, im1_rows, 4);
-  ack_case("im2", 3, 0x5678, im2_rows, 6);
+  ack_case("nmi", ACK_NMI, 0x0066, nmi_rows, 4);
+  ack_case("im0", ACK_IM0, 0x1001, im0_rows, 3);
+  ack_case("im1", ACK_IM1, 0x0038, im1_rows, 4);
+  ack_case("im2", ACK_IM2, 0x5678, im2_rows, 6);
 }
 
 int main(void) {
