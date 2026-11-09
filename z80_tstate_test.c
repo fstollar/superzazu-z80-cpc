@@ -184,27 +184,63 @@ static void check_pc(const char *label, z80 *z, uint16_t want) {
   }
 }
 
-/* Pins the full per-cycle start sequence of one step: count and every
-   start T must match exactly. Expected shapes come from the Undocumented
-   Z80 Documented (M-cycle/T-state tables) and, for the ED block and I/O
-   ops, the per-T bus traces in the SingleStepTests subset. */
-static void check_seq(const char *label, const unsigned *want, unsigned n) {
-#if CHECK_BUS_TIMES
-  if (event_count != n) {
-    printf("FAIL %s: %u bus events, want %u\n", label, event_count, n);
+/* Pins one step against its M-cycle row: positive entries are bus cycles
+   (their length in T, one callback each, in order), negative entries are
+   internal stretches with no callback. Two checks always run, even in a
+   validation build without the new fields: the row lengths must sum to the
+   charged generic cost, and the recorded callback count must match the
+   number of bus entries (so a wrong bus/internal split fails there too).
+   With the new fields present, every recorded start T must equal the
+   cumulative row position as well.
+   Row sources: Sean Young's Undocumented Z80 Documented M-cycle/T-state
+   tables for the branch, stack, indexed and DDCB shapes; the per-T bus
+   traces in the SingleStepTests subset for the ED block and I/O shapes.
+   Two rows need a note. OUTI/OTIR read (HL) before touching the port, so
+   in time order they are 4,5,3,4 (read at 9, OUT at 12); the Zilog
+   instruction list prints 4,5,4,3, which transposes the 3 T read and the
+   4 T port write against the per-T trace, so the trace wins here. The
+   interrupt acknowledges have no INTA callback in this core (the first
+   byte comes from z80_gen_int, follow-on bytes from im0_bus or plain
+   reads), hence the negative response entries. */
+static void check_trace(const char *label, z80 *z, const int *rows, unsigned nrows) {
+  unsigned total = 0, nbus = 0;
+  for (unsigned i = 0; i < nrows; ++i) {
+    total += (unsigned)(rows[i] < 0 ? -rows[i] : rows[i]);
+    if (rows[i] > 0)
+      ++nbus;
+  }
+  unsigned delta_cyc = z->cyc - cyc_before;
+  if (total != delta_cyc) {
+    printf("FAIL %s: M-cycle lengths sum to %u, generic cost is %u\n", label, total, delta_cyc);
+    ++failures;
+  }
+  if (event_count != nbus) {
+    printf("FAIL %s: %u bus events, row has %u bus cycles\n", label, event_count, nbus);
     ++failures;
     return;
   }
-  for (unsigned i = 0; i < n; ++i) {
-    if (event_start[i] != want[i]) {
-      printf("FAIL %s: event %u starts at %u, want %u\n", label, i, event_start[i], want[i]);
-      ++failures;
+#if CHECK_BUS_TIMES
+  {
+    unsigned start = 0;
+    unsigned ev = 0;
+    for (unsigned i = 0; i < nrows; ++i) {
+      if (rows[i] < 0) {
+        start += (unsigned)-rows[i];
+        continue;
+      }
+      if (event_start[ev] != start) {
+        printf("FAIL %s: event %u starts at %u, row gives %u\n", label, ev, event_start[ev], start);
+        ++failures;
+      }
+      start += (unsigned)rows[i];
+      ++ev;
     }
   }
 #else
   (void)label;
-  (void)want;
-  (void)n;
+  (void)z;
+  (void)rows;
+  (void)nrows;
 #endif
 }
 
@@ -308,7 +344,8 @@ static void sweep_ddfd(uint8_t prefix, const char *tag) {
 }
 
 static void cond_case(const char *label, uint8_t op, const uint8_t *extra, int extra_n,
-                      int take_flags, uint16_t want_pc, uint16_t want_sp) {
+                      int take_flags, uint16_t want_pc, uint16_t want_sp,
+                      const int *rows, unsigned nrows) {
   z80 z;
   set_base(&z);
   uint8_t b[8] = {op, 0, 0, 0, 0, 0, 0, 0};
@@ -325,6 +362,7 @@ static void cond_case(const char *label, uint8_t op, const uint8_t *extra, int e
   z80_step(&z);
   end_step(label, &z);
   check_pc(label, &z, want_pc);
+  check_trace(label, &z, rows, nrows);
   if (z.sp != want_sp) {
     printf("FAIL %s: sp is %04X, want %04X\n", label, z.sp, want_sp);
     ++failures;
@@ -342,18 +380,21 @@ static void cond_cases(void) {
   };
   for (unsigned i = 0; i < 4; ++i) {
     char label[40];
-    static const unsigned jr_seq[] = {0, 4};
+    /* JR: 4,3 taken plus 5 internal; not taken 4,3. */
+    static const int jr_taken[] = {4, 3, -5};
+    static const int jr_not[] = {4, 3};
     snprintf(label, sizeof(label), "jr %02X taken", jr_cases[i].op);
-    cond_case(label, jr_cases[i].op, disp_plus4, 1, jr_cases[i].taken, 0x1006, 0xF000);
-    check_seq(label, jr_seq, 2);
+    cond_case(label, jr_cases[i].op, disp_plus4, 1, jr_cases[i].taken, 0x1006, 0xF000,
+              jr_taken, 3);
     snprintf(label, sizeof(label), "jr %02X not taken", jr_cases[i].op);
-    cond_case(label, jr_cases[i].op, disp_plus4, 1, jr_cases[i].not_taken, 0x1002, 0xF000);
-    check_seq(label, jr_seq, 2);
+    cond_case(label, jr_cases[i].op, disp_plus4, 1, jr_cases[i].not_taken, 0x1002, 0xF000,
+              jr_not, 2);
   }
-  /* DJNZ *,d: taken while B - 1 is not 0. */
+  /* DJNZ *,d: 5 T fetch with the B decrement inside; taken adds 5
+     internal, not taken 5,3. */
   {
     z80 z;
-    static const unsigned djnz_seq[] = {0, 4};
+    static const int djnz_taken[] = {5, 3, -5};
     set_base(&z);
     z.b = 2;
     uint8_t b[8] = {0x10, 0x04, 0, 0, 0, 0, 0, 0};
@@ -362,11 +403,11 @@ static void cond_cases(void) {
     z80_step(&z);
     end_step("djnz taken", &z);
     check_pc("djnz taken", &z, 0x1006);
-    check_seq("djnz taken", djnz_seq, 2);
+    check_trace("djnz taken", &z, djnz_taken, 3);
   }
   {
     z80 z;
-    static const unsigned djnz_seq[] = {0, 4};
+    static const int djnz_not[] = {5, 3};
     set_base(&z);
     z.b = 1;
     uint8_t b[8] = {0x10, 0x04, 0, 0, 0, 0, 0, 0};
@@ -375,7 +416,7 @@ static void cond_cases(void) {
     z80_step(&z);
     end_step("djnz not taken", &z);
     check_pc("djnz not taken", &z, 0x1002);
-    check_seq("djnz not taken", djnz_seq, 2);
+    check_trace("djnz not taken", &z, djnz_not, 2);
   }
   /* JP/CALL/RET cc with nn = 0x2000. taken holds the flag bit for the
      odd conditions (z, c, pe, m) and clears it for the even ones
@@ -389,23 +430,24 @@ static void cond_cases(void) {
   };
   for (unsigned i = 0; i < 8; ++i) {
     char label[40];
-    static const unsigned call_taken[] = {0, 4, 7, 10, 13};
-    static const unsigned call_skipped[] = {0, 4, 7};
-    static const unsigned ret_taken[] = {0, 4, 7};
-    static const unsigned ret_skipped[] = {0};
+    /* JP: 4,3,3 either way. CALL: taken 4,3,4,3,3, not taken 4,3,3.
+       RET: taken 5,3,3, not taken 5. */
+    static const int jp_row[] = {4, 3, 3};
+    static const int call_taken[] = {4, 3, 4, 3, 3};
+    static const int call_not[] = {4, 3, 3};
+    static const int ret_taken[] = {5, 3, 3};
+    static const int ret_not[] = {5};
     int hold = 1 << cond_branches[i].bit;
     int taken = cond_branches[i].odd ? hold : 0;
     int skipped = cond_branches[i].odd ? 0 : hold;
     snprintf(label, sizeof(label), "jp %02X taken", cond_branches[i].jp);
-    cond_case(label, cond_branches[i].jp, nn, 2, taken, 0x2000, 0xF000);
+    cond_case(label, cond_branches[i].jp, nn, 2, taken, 0x2000, 0xF000, jp_row, 3);
     snprintf(label, sizeof(label), "jp %02X not taken", cond_branches[i].jp);
-    cond_case(label, cond_branches[i].jp, nn, 2, skipped, 0x1003, 0xF000);
+    cond_case(label, cond_branches[i].jp, nn, 2, skipped, 0x1003, 0xF000, jp_row, 3);
     snprintf(label, sizeof(label), "call %02X taken", cond_branches[i].call);
-    cond_case(label, cond_branches[i].call, nn, 2, taken, 0x2000, 0xEFFE);
-    check_seq(label, call_taken, 5);
+    cond_case(label, cond_branches[i].call, nn, 2, taken, 0x2000, 0xEFFE, call_taken, 5);
     snprintf(label, sizeof(label), "call %02X not taken", cond_branches[i].call);
-    cond_case(label, cond_branches[i].call, nn, 2, skipped, 0x1003, 0xF000);
-    check_seq(label, call_skipped, 3);
+    cond_case(label, cond_branches[i].call, nn, 2, skipped, 0x1003, 0xF000, call_not, 3);
     /* RET pops 0x2000 off the stack when taken; the stack is set after
        the base setup wipes memory. */
     snprintf(label, sizeof(label), "ret %02X taken", cond_branches[i].ret);
@@ -425,22 +467,22 @@ static void cond_cases(void) {
       z80_step(&z);
       end_step(label, &z);
       check_pc(label, &z, 0x2000);
-      check_seq(label, ret_taken, 3);
+      check_trace(label, &z, ret_taken, 3);
       if (z.sp != 0xF002) {
         printf("FAIL %s: sp is %04X, want F002\n", label, z.sp);
         ++failures;
       }
     }
     snprintf(label, sizeof(label), "ret %02X not taken", cond_branches[i].ret);
-    cond_case(label, cond_branches[i].ret, 0, 0, skipped, 0x1001, 0xF000);
-    check_seq(label, ret_skipped, 1);
+    cond_case(label, cond_branches[i].ret, 0, 0, skipped, 0x1001, 0xF000, ret_not, 1);
   }
 }
 
 /* One repeat-capable block op, repeating (pc rewinds) or ending. The B
    family (INIR/INDR/OTIR/OTDR) counts B, the BC family the whole BC;
    CPIR/CPDR also need no match to repeat. */
-static void block_case(const char *label, uint8_t ed_op, int repeat, int use_b) {
+static void block_case(const char *label, uint8_t ed_op, int repeat, int use_b,
+                       const int *rows, unsigned nrows) {
   z80 z;
   set_base(&z);
   if (use_b) {
@@ -457,42 +499,52 @@ static void block_case(const char *label, uint8_t ed_op, int repeat, int use_b) 
   z80_step(&z);
   end_step(label, &z);
   check_pc(label, &z, repeat ? 0x1000 : 0x1002);
+  check_trace(label, &z, rows, nrows);
 }
 
 static void block_cases(void) {
-  /* Start shapes per op, repeat then end. The BC compare family and the
-     LDI family share the LDIR shape; the B I/O family repeats the same
-     bus events with or without the repeat extra. Shapes match the
-     SingleStepTests bus traces. */
+  /* M-cycle rows, repeat then end. The BC memory family is 4,4,3,5 with
+     a 5 T repeat tail; CPIR/CPDR compare without writing, so their tail
+     and end rows mark the last 5 T internal and repeat with 3 bus
+     events. The B I/O family is 4,5,4,3 for INI/IND (port read at 9,
+     (HL) write at 13) and 4,5,3,4 for OUTI/OUTD ((HL) read at 9, port
+     write at 12), each with a 5 T internal repeat tail. All shapes match
+     the SingleStepTests bus traces. */
+  static const int bc_repeat[] = {4, 4, 3, 5, -5};
+  static const int bc_end[] = {4, 4, 3, 5};
+  static const int cp_repeat[] = {4, 4, 3, -5, -5};
+  static const int cp_end[] = {4, 4, 3, -5};
+  static const int in_repeat[] = {4, 5, 4, 3, -5};
+  static const int in_end[] = {4, 5, 4, 3};
+  static const int out_repeat[] = {4, 5, 3, 4, -5};
+  static const int out_end[] = {4, 5, 3, 4};
   static const struct {
     uint8_t op; int use_b; const char *name;
-    unsigned repeat_n; unsigned repeat_seq[4];
-    unsigned end_n; unsigned end_seq[4];
+    const int *repeat_rows; unsigned repeat_n;
+    const int *end_rows; unsigned end_n;
   } ops[] = {
-    {0xB0, 0, "ldir", 4, {0, 4, 8, 11}, 4, {0, 4, 8, 11}},
-    {0xB8, 0, "lddr", 4, {0, 4, 8, 11}, 4, {0, 4, 8, 11}},
-    {0xB1, 0, "cpir", 4, {0, 4, 8, 11}, 3, {0, 4, 8}},
-    {0xB9, 0, "cpdr", 4, {0, 4, 8, 11}, 3, {0, 4, 8}},
-    {0xB2, 1, "inir", 4, {0, 4, 9, 13}, 4, {0, 4, 9, 13}},
-    {0xBA, 1, "indr", 4, {0, 4, 9, 13}, 4, {0, 4, 9, 13}},
-    {0xB3, 1, "otir", 4, {0, 4, 9, 12}, 4, {0, 4, 9, 12}},
-    {0xBB, 1, "otdr", 4, {0, 4, 9, 12}, 4, {0, 4, 9, 12}},
+    {0xB0, 0, "ldir", bc_repeat, 5, bc_end, 4},
+    {0xB8, 0, "lddr", bc_repeat, 5, bc_end, 4},
+    {0xB1, 0, "cpir", cp_repeat, 5, cp_end, 4},
+    {0xB9, 0, "cpdr", cp_repeat, 5, cp_end, 4},
+    {0xB2, 1, "inir", in_repeat, 5, in_end, 4},
+    {0xBA, 1, "indr", in_repeat, 5, in_end, 4},
+    {0xB3, 1, "otir", out_repeat, 5, out_end, 4},
+    {0xBB, 1, "otdr", out_repeat, 5, out_end, 4},
   };
   for (unsigned i = 0; i < 8; ++i) {
     char label[40];
     snprintf(label, sizeof(label), "%s repeat", ops[i].name);
-    block_case(label, ops[i].op, 1, ops[i].use_b);
-    check_seq(label, ops[i].repeat_seq, ops[i].repeat_n);
+    block_case(label, ops[i].op, 1, ops[i].use_b, ops[i].repeat_rows, ops[i].repeat_n);
     snprintf(label, sizeof(label), "%s end", ops[i].name);
-    block_case(label, ops[i].op, 0, ops[i].use_b);
-    check_seq(label, ops[i].end_seq, ops[i].end_n);
+    block_case(label, ops[i].op, 0, ops[i].use_b, ops[i].end_rows, ops[i].end_n);
   }
 }
 
-/* EX (SP),HL swaps two stack bytes: two reads then two writes. */
+/* EX (SP),HL: 4,3,4,3,5, two stack reads then two writes. */
 static void ex_sp_case(void) {
   z80 z;
-  static const unsigned seq[] = {0, 4, 7, 10, 13};
+  static const int rows[] = {4, 3, 4, 3, 5};
   set_base(&z);
   uint8_t b[1] = {0xE3};
   load_bytes(b, 1);
@@ -502,18 +554,18 @@ static void ex_sp_case(void) {
   z80_step(&z);
   end_step("ex (sp),hl", &z);
   check_pc("ex (sp),hl", &z, 0x1001);
-  check_seq("ex (sp),hl", seq, 5);
+  check_trace("ex (sp),hl", &z, rows, 5);
   if (z.sp != 0xF000) {
     printf("FAIL ex (sp),hl: sp is %04X, want F000\n", z.sp);
     ++failures;
   }
 }
 
-/* IN r,(C) and OUT (C),r for every register: two fetches, port at 8. */
+/* IN r,(C) and OUT (C),r for every register: 4,4,4, port at 8. */
 static void in_out_c_cases(void) {
   for (unsigned r = 0; r < 8; ++r) {
     z80 z;
-    static const unsigned seq[] = {0, 4, 8};
+    static const int rows[] = {4, 4, 4};
     char label[40];
     snprintf(label, sizeof(label), "in %u,(c)", r);
     set_base(&z);
@@ -522,7 +574,7 @@ static void in_out_c_cases(void) {
     begin_step(&z);
     z80_step(&z);
     end_step(label, &z);
-    check_seq(label, seq, 3);
+    check_trace(label, &z, rows, 3);
     snprintf(label, sizeof(label), "out (c),%u", r);
     set_base(&z);
     uint8_t c[2] = {0xED, (uint8_t)(0x41 + 8 * r)};
@@ -530,15 +582,15 @@ static void in_out_c_cases(void) {
     begin_step(&z);
     z80_step(&z);
     end_step(label, &z);
-    check_seq(label, seq, 3);
+    check_trace(label, &z, rows, 3);
   }
 }
 
 /* DDCB: displacement and op bytes are 3 T reads at 8 and 11; BIT stops
-   after the (IX+d) read at 14, other forms write at 17. */
+   after the (IX+d) read at 16, other forms write at 20. */
 static void ddcb_cases(void) {
-  static const unsigned bit_seq[] = {0, 4, 8, 11, 14};
-  static const unsigned other_seq[] = {0, 4, 8, 11, 14, 17};
+  static const int bit_rows[] = {4, 4, 3, 5, 4};
+  static const int other_rows[] = {4, 4, 3, 5, 4, 3};
   z80 z;
   set_base(&z);
   uint8_t b[4] = {0xDD, 0xCB, 0x05, 0x46};
@@ -547,7 +599,7 @@ static void ddcb_cases(void) {
   z80_step(&z);
   end_step("ddcb bit", &z);
   check_pc("ddcb bit", &z, 0x1004);
-  check_seq("ddcb bit", bit_seq, 5);
+  check_trace("ddcb bit", &z, bit_rows, 5);
   set_base(&z);
   uint8_t c[4] = {0xDD, 0xCB, 0x05, 0x06};
   load_bytes(c, 4);
@@ -555,13 +607,13 @@ static void ddcb_cases(void) {
   z80_step(&z);
   end_step("ddcb rlc", &z);
   check_pc("ddcb rlc", &z, 0x1004);
-  check_seq("ddcb rlc", other_seq, 6);
+  check_trace("ddcb rlc", &z, other_rows, 6);
 }
 
 /* LD (IX+d),n reads its n byte at 11, like the DDCB op byte. */
 static void ix_d_n_case(void) {
   z80 z;
-  static const unsigned seq[] = {0, 4, 8, 11, 14};
+  static const int rows[] = {4, 4, 3, 5, 3};
   set_base(&z);
   uint8_t b[4] = {0xDD, 0x36, 0x05, 0x42};
   load_bytes(b, 4);
@@ -569,7 +621,7 @@ static void ix_d_n_case(void) {
   z80_step(&z);
   end_step("ld (ix+5),n", &z);
   check_pc("ld (ix+5),n", &z, 0x1004);
-  check_seq("ld (ix+5),n", seq, 5);
+  check_trace("ld (ix+5),n", &z, rows, 5);
   if (ram[0x4005] != 0x42) {
     printf("FAIL ld (ix+5),n: (IX+5) is %02X, want 42\n", ram[0x4005]);
     ++failures;
@@ -577,8 +629,12 @@ static void ix_d_n_case(void) {
 }
 
 /* kind: 0 = NMI, 1 = IM0, 2 = IM1, 3 = IM2. A NOP runs first, then the
-   acknowledge; the IM0 byte is a NOP so nothing else executes. */
-static void ack_case(const char *label, int kind, uint16_t want_pc) {
+   acknowledge; the IM0 byte is a NOP so nothing else executes. Rows
+   start with the NOP's 4 T fetch; the acknowledge response itself emits
+   no callback (the first byte comes from z80_gen_int), then come the
+   stack pushes and, for IM2, the two vector-table reads. */
+static void ack_case(const char *label, int kind, uint16_t want_pc,
+                     const int *rows, unsigned nrows) {
   z80 z;
   set_base(&z);
   z.iff1 = 1;
@@ -601,6 +657,7 @@ static void ack_case(const char *label, int kind, uint16_t want_pc) {
   z80_step(&z);
   end_step(label, &z);
   check_pc(label, &z, want_pc);
+  check_trace(label, &z, rows, nrows);
   if (z.iff1) {
     printf("FAIL %s: iff1 still set after acknowledge\n", label);
     ++failures;
@@ -608,18 +665,15 @@ static void ack_case(const char *label, int kind, uint16_t want_pc) {
 }
 
 static void ack_cases(void) {
-  static const unsigned nmi_seq[] = {0, 9, 12};
-  static const unsigned im0_seq[] = {0};
-  static const unsigned im1_seq[] = {0, 11, 14};
-  static const unsigned im2_seq[] = {0, 11, 14, 17, 20};
-  ack_case("nmi", 0, 0x0066);
-  check_seq("nmi", nmi_seq, 3);
-  ack_case("im0", 1, 0x1001);
-  check_seq("im0", im0_seq, 1);
-  ack_case("im1", 2, 0x0038);
-  check_seq("im1", im1_seq, 3);
-  ack_case("im2", 3, 0x5678);
-  check_seq("im2", im2_seq, 6);
+  /* Totals match Young §5: NMI 4+11, IM0 4+2+4, IM1 4+13, IM2 4+19. */
+  static const int nmi_rows[] = {4, -5, 3, 3};
+  static const int im0_rows[] = {4, -2, -4};
+  static const int im1_rows[] = {4, -7, 3, 3};
+  static const int im2_rows[] = {4, -7, 3, 3, 3, 3};
+  ack_case("nmi", 0, 0x0066, nmi_rows, 4);
+  ack_case("im0", 1, 0x1001, im0_rows, 3);
+  ack_case("im1", 2, 0x0038, im1_rows, 4);
+  ack_case("im2", 3, 0x5678, im2_rows, 6);
 }
 
 int main(void) {
