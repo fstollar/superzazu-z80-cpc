@@ -13,17 +13,22 @@
  * cannot silently pass as the other side of a conditional.
  *
  * While stepping, every bus callback records the cycle's start T through
- * the per-callback field; each recorded start must lie inside the step.
- * No WAIT is driven here (that is the T2 test's job) and no dynamic waits
+ * the per-callback field; each recorded start must lie inside the step,
+ * starts never go backwards, and two starts are never closer than 3 T.
+ * A few sample cases additionally pin the full start sequence. No WAIT is
+ * driven here (that is the WAIT-phase test's job) and no dynamic waits
  * are added, so the run is fully deterministic.
  *
  * Needs the timed-bus-cycles interface: the t_counter field in struct z80
  * (separate from the microsecond cyc) and the per-callback bus_cycle_start
  * field.
- * Compile with -DT1_VALIDATE_DRIVER to check this driver against the
- * current cycle charging instead: expectations then go through cyc and
- * the start-T recording is skipped. That is how the committed test was
- * validated before the T counter existed.
+ * Compile with -DVALIDATE_DRIVER_AGAINST_CYC to check this driver against
+ * the current cycle charging instead: expectations then go through cyc
+ * and the start-T recording and start sequences are skipped. That is how
+ * the committed test was validated before the T counter existed. A green
+ * run under that flag proves the setups drive the intended paths and the
+ * harness works; it proves nothing about the T counter or the start-T
+ * field, which stay unchecked until the flag is off.
  */
 #include <stdio.h>
 #include <string.h>
@@ -31,7 +36,7 @@
 #include "z80.h"
 #include "z80_timing.h"
 
-#ifdef T1_VALIDATE_DRIVER
+#ifdef VALIDATE_DRIVER_AGAINST_CYC
 #define READ_T_COUNTER(z) ((z)->cyc)
 #define CALLBACK_BUS_CYCLE_START(z) (0u)
 #define CHECK_BUS_TIMES 0
@@ -145,6 +150,26 @@ static void end_step(const char *label, z80 *z) {
       ++failures;
       break;
     }
+    if (i > 0) {
+      if (ev_t[i] < ev_t[i - 1]) {
+        printf("FAIL %s: bus start T %u before previous %u\n", label, ev_t[i], ev_t[i - 1]);
+        ++failures;
+        break;
+      }
+      /* Every bus cycle holds the bus for at least 3 T, so two callbacks
+         can never start closer together than that. */
+      if (ev_t[i] - ev_t[i - 1] < 3) {
+        printf("FAIL %s: bus starts %u and %u less than 3 T apart\n", label, ev_t[i - 1], ev_t[i]);
+        ++failures;
+        break;
+      }
+    }
+  }
+  /* The last cycle runs at least 3 T past its start, so it must still
+     end within the step. */
+  if (ev_n > 0 && ev_t[ev_n - 1] + 3 > dt) {
+    printf("FAIL %s: last bus start T %u ends past the step (total %u)\n", label, ev_t[ev_n - 1], dt);
+    ++failures;
   }
 #else
   (void)label;
@@ -157,6 +182,30 @@ static void check_pc(const char *label, z80 *z, uint16_t want) {
     printf("FAIL %s: pc is %04X, want %04X (wrong path ran)\n", label, z->pc, want);
     ++failures;
   }
+}
+
+/* Pins the full per-cycle start sequence of one step: count and every
+   start T must match exactly. Expected shapes come from the Undocumented
+   Z80 Documented (M-cycle/T-state tables) and, for the ED block and I/O
+   ops, the per-T bus traces in the SingleStepTests subset. */
+static void check_seq(const char *label, const unsigned *want, unsigned n) {
+#if CHECK_BUS_TIMES
+  if (ev_n != n) {
+    printf("FAIL %s: %u bus events, want %u\n", label, ev_n, n);
+    ++failures;
+    return;
+  }
+  for (unsigned i = 0; i < n; ++i) {
+    if (ev_t[i] != want[i]) {
+      printf("FAIL %s: event %u starts at %u, want %u\n", label, i, ev_t[i], want[i]);
+      ++failures;
+    }
+  }
+#else
+  (void)label;
+  (void)want;
+  (void)n;
+#endif
 }
 
 static void load_bytes(const uint8_t *b, int n) {
@@ -293,14 +342,18 @@ static void cond_cases(void) {
   };
   for (unsigned i = 0; i < 4; ++i) {
     char label[40];
+    static const unsigned jr_seq[] = {0, 4};
     snprintf(label, sizeof(label), "jr %02X taken", jrs[i].op);
     cond_case(label, jrs[i].op, d4, 1, jrs[i].taken, 0x1006, 0xF000);
+    check_seq(label, jr_seq, 2);
     snprintf(label, sizeof(label), "jr %02X not taken", jrs[i].op);
     cond_case(label, jrs[i].op, d4, 1, jrs[i].not_taken, 0x1002, 0xF000);
+    check_seq(label, jr_seq, 2);
   }
   /* DJNZ *,d: taken while B - 1 is not 0. */
   {
     z80 z;
+    static const unsigned djnz_seq[] = {0, 4};
     set_base(&z);
     z.b = 2;
     uint8_t b[8] = {0x10, 0x04, 0, 0, 0, 0, 0, 0};
@@ -309,9 +362,11 @@ static void cond_cases(void) {
     z80_step(&z);
     end_step("djnz taken", &z);
     check_pc("djnz taken", &z, 0x1006);
+    check_seq("djnz taken", djnz_seq, 2);
   }
   {
     z80 z;
+    static const unsigned djnz_seq[] = {0, 4};
     set_base(&z);
     z.b = 1;
     uint8_t b[8] = {0x10, 0x04, 0, 0, 0, 0, 0, 0};
@@ -320,6 +375,7 @@ static void cond_cases(void) {
     z80_step(&z);
     end_step("djnz not taken", &z);
     check_pc("djnz not taken", &z, 0x1002);
+    check_seq("djnz not taken", djnz_seq, 2);
   }
   /* JP/CALL/RET cc with nn = 0x2000. taken holds the flag bit for the
      odd conditions (z, c, pe, m) and clears it for the even ones
@@ -333,6 +389,10 @@ static void cond_cases(void) {
   };
   for (unsigned i = 0; i < 8; ++i) {
     char label[40];
+    static const unsigned call_taken[] = {0, 4, 7, 10, 13};
+    static const unsigned call_skipped[] = {0, 4, 7};
+    static const unsigned ret_taken[] = {0, 4, 7};
+    static const unsigned ret_skipped[] = {0};
     int hold = 1 << ccs[i].bit;
     int taken = ccs[i].odd ? hold : 0;
     int skipped = ccs[i].odd ? 0 : hold;
@@ -342,8 +402,10 @@ static void cond_cases(void) {
     cond_case(label, ccs[i].jp, nn, 2, skipped, 0x1003, 0xF000);
     snprintf(label, sizeof(label), "call %02X taken", ccs[i].call);
     cond_case(label, ccs[i].call, nn, 2, taken, 0x2000, 0xEFFE);
+    check_seq(label, call_taken, 5);
     snprintf(label, sizeof(label), "call %02X not taken", ccs[i].call);
     cond_case(label, ccs[i].call, nn, 2, skipped, 0x1003, 0xF000);
+    check_seq(label, call_skipped, 3);
     /* RET pops 0x2000 off the stack when taken; the stack is set after
        the base setup wipes memory. */
     snprintf(label, sizeof(label), "ret %02X taken", ccs[i].ret);
@@ -363,6 +425,7 @@ static void cond_cases(void) {
       z80_step(&z);
       end_step(label, &z);
       check_pc(label, &z, 0x2000);
+      check_seq(label, ret_taken, 3);
       if (z.sp != 0xF002) {
         printf("FAIL %s: sp is %04X, want F002\n", label, z.sp);
         ++failures;
@@ -370,6 +433,7 @@ static void cond_cases(void) {
     }
     snprintf(label, sizeof(label), "ret %02X not taken", ccs[i].ret);
     cond_case(label, ccs[i].ret, 0, 0, skipped, 0x1001, 0xF000);
+    check_seq(label, ret_skipped, 1);
   }
 }
 
@@ -396,18 +460,119 @@ static void block_case(const char *label, uint8_t ed_op, int repeat, int use_b) 
 }
 
 static void block_cases(void) {
-  static const struct { uint8_t op; int use_b; const char *name; } ops[] = {
-    {0xB0, 0, "ldir"}, {0xB8, 0, "lddr"},
-    {0xB1, 0, "cpir"}, {0xB9, 0, "cpdr"},
-    {0xB2, 1, "inir"}, {0xBA, 1, "indr"},
-    {0xB3, 1, "otir"}, {0xBB, 1, "otdr"},
+  /* Start shapes per op, repeat then end. The BC compare family and the
+     LDI family share the LDIR shape; the B I/O family repeats the same
+     bus events with or without the repeat extra. Shapes match the
+     SingleStepTests bus traces. */
+  static const struct {
+    uint8_t op; int use_b; const char *name;
+    unsigned repeat_n; unsigned repeat_seq[4];
+    unsigned end_n; unsigned end_seq[4];
+  } ops[] = {
+    {0xB0, 0, "ldir", 4, {0, 4, 8, 11}, 4, {0, 4, 8, 11}},
+    {0xB8, 0, "lddr", 4, {0, 4, 8, 11}, 4, {0, 4, 8, 11}},
+    {0xB1, 0, "cpir", 4, {0, 4, 8, 11}, 3, {0, 4, 8}},
+    {0xB9, 0, "cpdr", 4, {0, 4, 8, 11}, 3, {0, 4, 8}},
+    {0xB2, 1, "inir", 4, {0, 4, 9, 13}, 4, {0, 4, 9, 13}},
+    {0xBA, 1, "indr", 4, {0, 4, 9, 13}, 4, {0, 4, 9, 13}},
+    {0xB3, 1, "otir", 4, {0, 4, 9, 12}, 4, {0, 4, 9, 12}},
+    {0xBB, 1, "otdr", 4, {0, 4, 9, 12}, 4, {0, 4, 9, 12}},
   };
   for (unsigned i = 0; i < 8; ++i) {
     char label[40];
     snprintf(label, sizeof(label), "%s repeat", ops[i].name);
     block_case(label, ops[i].op, 1, ops[i].use_b);
+    check_seq(label, ops[i].repeat_seq, ops[i].repeat_n);
     snprintf(label, sizeof(label), "%s end", ops[i].name);
     block_case(label, ops[i].op, 0, ops[i].use_b);
+    check_seq(label, ops[i].end_seq, ops[i].end_n);
+  }
+}
+
+/* EX (SP),HL swaps two stack bytes: two reads then two writes. */
+static void ex_sp_case(void) {
+  z80 z;
+  static const unsigned seq[] = {0, 4, 7, 10, 13};
+  set_base(&z);
+  uint8_t b[1] = {0xE3};
+  load_bytes(b, 1);
+  ram[0xF000] = 0x34;
+  ram[0xF001] = 0x12;
+  begin_step(&z);
+  z80_step(&z);
+  end_step("ex (sp),hl", &z);
+  check_pc("ex (sp),hl", &z, 0x1001);
+  check_seq("ex (sp),hl", seq, 5);
+  if (z.sp != 0xF000) {
+    printf("FAIL ex (sp),hl: sp is %04X, want F000\n", z.sp);
+    ++failures;
+  }
+}
+
+/* IN r,(C) and OUT (C),r for every register: two fetches, port at 8. */
+static void in_out_c_cases(void) {
+  for (unsigned r = 0; r < 8; ++r) {
+    z80 z;
+    static const unsigned seq[] = {0, 4, 8};
+    char label[40];
+    snprintf(label, sizeof(label), "in %u,(c)", r);
+    set_base(&z);
+    uint8_t b[2] = {0xED, (uint8_t)(0x40 + 8 * r)};
+    load_bytes(b, 2);
+    begin_step(&z);
+    z80_step(&z);
+    end_step(label, &z);
+    check_seq(label, seq, 3);
+    snprintf(label, sizeof(label), "out (c),%u", r);
+    set_base(&z);
+    uint8_t c[2] = {0xED, (uint8_t)(0x41 + 8 * r)};
+    load_bytes(c, 2);
+    begin_step(&z);
+    z80_step(&z);
+    end_step(label, &z);
+    check_seq(label, seq, 3);
+  }
+}
+
+/* DDCB: displacement and op bytes are 3 T reads at 8 and 11; BIT stops
+   after the (IX+d) read at 14, other forms write at 17. */
+static void ddcb_cases(void) {
+  static const unsigned bit_seq[] = {0, 4, 8, 11, 14};
+  static const unsigned other_seq[] = {0, 4, 8, 11, 14, 17};
+  z80 z;
+  set_base(&z);
+  uint8_t b[4] = {0xDD, 0xCB, 0x05, 0x46};
+  load_bytes(b, 4);
+  begin_step(&z);
+  z80_step(&z);
+  end_step("ddcb bit", &z);
+  check_pc("ddcb bit", &z, 0x1004);
+  check_seq("ddcb bit", bit_seq, 5);
+  set_base(&z);
+  uint8_t c[4] = {0xDD, 0xCB, 0x05, 0x06};
+  load_bytes(c, 4);
+  begin_step(&z);
+  z80_step(&z);
+  end_step("ddcb rlc", &z);
+  check_pc("ddcb rlc", &z, 0x1004);
+  check_seq("ddcb rlc", other_seq, 6);
+}
+
+/* LD (IX+d),n reads its n byte at 11, like the DDCB op byte. */
+static void ix_d_n_case(void) {
+  z80 z;
+  static const unsigned seq[] = {0, 4, 8, 11, 14};
+  set_base(&z);
+  uint8_t b[4] = {0xDD, 0x36, 0x05, 0x42};
+  load_bytes(b, 4);
+  begin_step(&z);
+  z80_step(&z);
+  end_step("ld (ix+5),n", &z);
+  check_pc("ld (ix+5),n", &z, 0x1004);
+  check_seq("ld (ix+5),n", seq, 5);
+  if (ram[0x4005] != 0x42) {
+    printf("FAIL ld (ix+5),n: (IX+5) is %02X, want 42\n", ram[0x4005]);
+    ++failures;
   }
 }
 
@@ -443,10 +608,18 @@ static void ack_case(const char *label, int kind, uint16_t want_pc) {
 }
 
 static void ack_cases(void) {
+  static const unsigned nmi_seq[] = {0, 9, 12};
+  static const unsigned im0_seq[] = {0};
+  static const unsigned im1_seq[] = {0, 11, 14};
+  static const unsigned im2_seq[] = {0, 11, 14, 17, 20};
   ack_case("nmi", 0, 0x0066);
+  check_seq("nmi", nmi_seq, 3);
   ack_case("im0", 1, 0x1001);
+  check_seq("im0", im0_seq, 1);
   ack_case("im1", 2, 0x0038);
+  check_seq("im1", im1_seq, 3);
   ack_case("im2", 3, 0x5678);
+  check_seq("im2", im2_seq, 6);
 }
 
 int main(void) {
@@ -457,6 +630,10 @@ int main(void) {
   sweep_ddfd(0xFD, "fd");
   cond_cases();
   block_cases();
+  ex_sp_case();
+  in_out_c_cases();
+  ddcb_cases();
+  ix_d_n_case();
   ack_cases();
   if (failures == 0)
     printf("tstate: all cases pass\n");

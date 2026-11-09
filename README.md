@@ -187,6 +187,12 @@ Tests complete
 *** 5764169747 instructions executed on 46734978649 cycles (expected=46734978649, diff=0)
 ```
 
+A second test, `z80_tstate_test.c`, checks bus-cycle timing: for every
+opcode it steps one instruction and compares the new T counter against
+the charged cost, recording each bus callback's start time. It needs the
+timed bus interface, so it is not part of `make all`; build it with
+`make tstate_test` once the interface lands.
+
 ## Licensing
 
 This project is under the MIT license; except the files in `roms` which are provided for convenience to test the z80 core implementation. These files authors' and licenses can be seen in the source files (.z80/.src files).
