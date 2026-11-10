@@ -71,6 +71,7 @@ static inline bool cyc_table_now(const z80* const z) {
 // settles 3rd-T versus last-Tw sampling.
 static inline void inta(z80* const z) {
   z->bus_cycle_start = z->t_counter;
+  z->port_high_byte_from_a = false;
   apply_sampled_waits(z, z->t_counter + 3);
   z->t_counter += 6;
 }
@@ -79,6 +80,7 @@ static inline uint8_t rb(z80* const z, uint16_t addr) {
   // data -- every HL/BC/DE/IX+d/nn operand, stack pop,
   // ex (sp),hl and block-op byte. A data read holds the bus for 3 T.
   z->bus_cycle_start = z->t_counter;
+  z->port_high_byte_from_a = false;
   apply_sampled_waits(z, z->t_counter + 1);
   z->t_counter += 3;
   return z->read_byte(z->userdata, addr, Z80_READ_DATA);
@@ -88,6 +90,7 @@ static inline uint8_t rb(z80* const z, uint16_t addr) {
 // rb() above, tagged so the host can tell it apart.
 static inline uint8_t rb_im2(z80* const z, uint16_t addr) {
   z->bus_cycle_start = z->t_counter;
+  z->port_high_byte_from_a = false;
   apply_sampled_waits(z, z->t_counter + 1);
   z->t_counter += 3;
   return z->read_byte(z->userdata, addr, Z80_READ_IM2_VECTOR);
@@ -96,6 +99,7 @@ static inline uint8_t rb_im2(z80* const z, uint16_t addr) {
 static inline void wb(z80* const z, uint16_t addr, uint8_t val) {
   // A data write holds the bus for 3 T, like a data read.
   z->bus_cycle_start = z->t_counter;
+  z->port_high_byte_from_a = false;
   apply_sampled_waits(z, z->t_counter + 1);
   z->t_counter += 3;
   z->write_byte(z->userdata, addr, val);
@@ -142,12 +146,14 @@ static inline uint8_t nextb(z80* const z) {
   if (z->im0_active) {
     // IM 0: operand bytes are normal memory reads at the frozen PC.
     z->bus_cycle_start = z->t_counter;
+    z->port_high_byte_from_a = false;
     apply_sampled_waits(z, z->t_counter + 1);
     z->t_counter += 3;
     return z->im0_bus ? z->im0_bus(z, z->pc, Z80_IM0_READ)
                       : z->read_byte(z->userdata, z->pc, Z80_READ_OPERAND);
   }
   z->bus_cycle_start = z->t_counter;
+  z->port_high_byte_from_a = false;
   apply_sampled_waits(z, z->t_counter + 1);
   z->t_counter += 3;
   return z->read_byte(z->userdata, z->pc++, Z80_READ_OPERAND);
@@ -192,21 +198,26 @@ static inline uint8_t fetchb(z80* const z) {
     return z->im0_bus ? z->im0_bus(z, z->pc, Z80_IM0_INTA) : 0xFF;
   }
   z->bus_cycle_start = z->t_counter;
+  z->port_high_byte_from_a = false;
   apply_sampled_waits(z, z->t_counter + 1);
   z->t_counter += 4;
   return z->read_byte(z->userdata, z->pc++, Z80_READ_M1);
 }
 
 // A port access holds the bus for 4 T (3 bus T plus the automatic wait T).
-static inline uint8_t port_rd(z80* const z, uint16_t port) {
+// high_byte_from_a marks the two shapes whose port address takes its high
+// byte from A (IN A,(n), OUT (n),A); every other shape takes it from B or C.
+static inline uint8_t port_rd(z80* const z, uint16_t port, bool high_byte_from_a) {
   z->bus_cycle_start = z->t_counter;
+  z->port_high_byte_from_a = high_byte_from_a;
   apply_sampled_waits(z, z->t_counter + 2);
   z->t_counter += 4;
   return z->port_in(z, port);
 }
 
-static inline void port_wr(z80* const z, uint16_t port, uint8_t val) {
+static inline void port_wr(z80* const z, uint16_t port, uint8_t val, bool high_byte_from_a) {
   z->bus_cycle_start = z->t_counter;
+  z->port_high_byte_from_a = high_byte_from_a;
   apply_sampled_waits(z, z->t_counter + 2);
   z->t_counter += 4;
   z->port_out(z, port, val);
@@ -743,7 +754,7 @@ static void in_r_c(z80* const z, uint8_t* r) {
   // MEMPTR = BC + 1 for every IN r,(C), taken before r is written (IN B
   // and IN C change BC).
   z->mem_ptr = get_bc(z) + 1;
-  *r = port_rd(z, get_bc(z));
+  *r = port_rd(z, get_bc(z), false);
   z->flags_written = 1;
   z->zf = *r == 0;
   z->sf = *r >> 7;
@@ -758,7 +769,7 @@ static void ini(z80* const z) {
   // The second fetch closes with one internal T ahead of the port read.
   internal_t_states(z, 1);
   uint16_t bc_before = get_bc(z);
-  uint8_t val = port_rd(z, bc_before);
+  uint8_t val = port_rd(z, bc_before, false);
   wb(z, get_hl(z), val);
   set_hl(z, get_hl(z) + 1);
   z->b -= 1;
@@ -785,7 +796,7 @@ static void outi(z80* const z) {
   internal_t_states(z, 1);
   uint8_t val = rb(z, get_hl(z));
   z->b -= 1;
-  port_wr(z, get_bc(z), val);
+  port_wr(z, get_bc(z), val, false);
   set_hl(z, get_hl(z) + 1);
   z->flags_written = 1;
   z->zf = z->b == 0;
@@ -1028,6 +1039,24 @@ void z80_init(z80* const z) {
   z->int_data = 0;
 }
 
+// The running cycle's strobe windows, in half-T counts from the cycle's
+// own start T and WAIT sample slot (see z80.h). No per-cycle state is
+// kept: the host reads these inside a bus callback, where bus_cycle_start
+// and wait_sample_t name the running cycle.
+z80_strobe_window_t z80_iorq_window(const z80* const z) {
+  const z80_strobe_window_t w = {
+    2 * z->bus_cycle_start + 2, 2 * z->wait_sample_t + 3
+  };
+  return w;
+}
+
+z80_strobe_window_t z80_write_window(const z80* const z) {
+  const z80_strobe_window_t w = {
+    2 * z->bus_cycle_start + 3, 2 * z->wait_sample_t + 3
+  };
+  return w;
+}
+
 // executes the next instruction in memory + handles interrupts
 void z80_step(z80* const z) {
   z->iff_delay = 0;
@@ -1041,7 +1070,17 @@ void z80_step(z80* const z) {
   const bool derived_now = cyc_derived_now(z);
   z->cyc_derived_step = derived_now;
   const unsigned free_phase = derived_now ? wait_free_phase(z->periodic_wait_mask) : 0;
-  const unsigned long start_slot = derived_now ? align_free_slot(z->t_counter + 1, free_phase) : 0;
+  // The step's M1 sample slot: the first slot at or after one T past the
+  // entry counter that the mask leaves free (entry T plus one when the
+  // mask stretches nothing). This uses the mask's own free phase, not the
+  // derived-mode latch above (which is 0 outside derived mode): the slot
+  // is set on both cycle-count sources. The derived charge below spans
+  // from this same slot, so both agree even if a callback changes the
+  // mask or the source mid-step; acknowledges never rewrite it, so it
+  // still names the instruction's own slot after a trailing acknowledge.
+  const unsigned entry_free = wait_free_phase(z->periodic_wait_mask);
+  z->step_m1_sample_tstate = entry_free < 4 ? align_free_slot(z->t_counter + 1, entry_free) : z->t_counter + 1;
+  const unsigned long start_slot = derived_now ? z->step_m1_sample_tstate : 0;
   if (z->halted) {
     // A halted CPU keeps fetching NOPs with no bus-visible advance here
     // (no fetch is issued on this path); the 4 T run internal.
@@ -1560,7 +1599,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     // instruction, not B (as it is for the ED-prefixed "in r,(c)" form).
     const uint8_t port = nextb(z);
     const uint8_t a = z->a;
-    z->a = port_rd(z, (uint16_t)(a << 8) | port);
+    z->a = port_rd(z, (uint16_t)(a << 8) | port, true);
     z->mem_ptr = (uint16_t)(((a << 8) | port) + 1);
   } break; // in a,(n)
 
@@ -1568,7 +1607,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     // same quirk as above: A supplies both the upper address byte and the
     // data byte for this instruction.
     const uint8_t port = nextb(z);
-    port_wr(z, (uint16_t)(z->a << 8) | port, z->a);
+    port_wr(z, (uint16_t)(z->a << 8) | port, z->a, true);
     z->mem_ptr = (port + 1) | (z->a << 8);
   } break; // out (n), a
 
@@ -2052,35 +2091,35 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     break; // indr
 
   case 0x41:
-    port_wr(z, get_bc(z), z->b);
+    port_wr(z, get_bc(z), z->b, false);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), b
   case 0x49:
-    port_wr(z, get_bc(z), z->c);
+    port_wr(z, get_bc(z), z->c, false);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), c
   case 0x51:
-    port_wr(z, get_bc(z), z->d);
+    port_wr(z, get_bc(z), z->d, false);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), d
   case 0x59:
-    port_wr(z, get_bc(z), z->e);
+    port_wr(z, get_bc(z), z->e, false);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), e
   case 0x61:
-    port_wr(z, get_bc(z), z->h);
+    port_wr(z, get_bc(z), z->h, false);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), h
   case 0x69:
-    port_wr(z, get_bc(z), z->l);
+    port_wr(z, get_bc(z), z->l, false);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), l
   case 0x71:
-    port_wr(z, get_bc(z), 0);
+    port_wr(z, get_bc(z), 0, false);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), 0
   case 0x79:
-    port_wr(z, get_bc(z), z->a);
+    port_wr(z, get_bc(z), z->a, false);
     z->mem_ptr = get_bc(z) + 1;
     break; // out (c), a
 

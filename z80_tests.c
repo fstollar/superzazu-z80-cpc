@@ -1524,6 +1524,229 @@ static int run_hostequiv_test(void) {
   return bad != 0;
 }
 
+// MARK: M1 sample slot and strobe windows
+// The step's first M1 WAIT-sample slot, the running cycle's /IORQ and /WR
+// windows, and which port shapes take their address high byte from A.
+// Every bus-cycle shape (M1 fetch, memory read, memory write, port read,
+// port write) runs at four start phases under mask 0 (no stretching) and
+// mask 0xD (one free phase), on both cycle-count sources. The slot must be
+// the first free slot at or after entry T plus one; both windows must
+// follow the running cycle's start and WAIT sample T; only IN A,(n) and
+// OUT (n),A report the high byte from A. A trailing NMI acknowledge must
+// leave the slot alone, and the halted path reports the slot its fetch
+// would have used.
+#define STROBE_MAX_EVENTS 16
+static struct {
+  char kind; // 'm' M1 fetch, 'r' memory/operand read, 'w' memory write,
+             // 'i' port read, 'o' port write
+  unsigned long start, sample;
+  unsigned long iorq_begin, iorq_end, wr_begin, wr_end;
+  bool high_byte_from_a;
+} strobe_events[STROBE_MAX_EVENTS];
+static int strobe_event_count;
+static z80* strobe_cpu;
+
+static void strobe_record(char kind, z80* const z) {
+  if (strobe_event_count < STROBE_MAX_EVENTS) {
+    strobe_events[strobe_event_count].kind = kind;
+    strobe_events[strobe_event_count].start = z->bus_cycle_start;
+    strobe_events[strobe_event_count].sample = z->wait_sample_t;
+    const z80_strobe_window_t iorq = z80_iorq_window(z);
+    const z80_strobe_window_t wr = z80_write_window(z);
+    strobe_events[strobe_event_count].iorq_begin = iorq.begin_half_tstates;
+    strobe_events[strobe_event_count].iorq_end = iorq.end_half_tstates;
+    strobe_events[strobe_event_count].wr_begin = wr.begin_half_tstates;
+    strobe_events[strobe_event_count].wr_end = wr.end_half_tstates;
+    strobe_events[strobe_event_count].high_byte_from_a =
+        z->port_high_byte_from_a;
+    strobe_event_count++;
+  }
+}
+
+static uint8_t strobe_rb(void* userdata, uint16_t addr, z80_read_kind_t kind) {
+  (void)userdata;
+  strobe_record(kind == Z80_READ_M1 ? 'm' : 'r', strobe_cpu);
+  return memory[addr];
+}
+
+static void strobe_wb(void* userdata, uint16_t addr, uint8_t val) {
+  (void)userdata;
+  strobe_record('w', strobe_cpu);
+  memory[addr] = val;
+}
+
+static uint8_t strobe_in(z80* const z, uint16_t port) {
+  (void)port;
+  strobe_record('i', z);
+  return 0xFF;
+}
+
+static void strobe_out(z80* const z, uint16_t port, uint8_t val) {
+  (void)port;
+  (void)val;
+  strobe_record('o', z);
+}
+
+// First free phase-1 slot at or after entry T plus one: mask 0xD leaves
+// only phase 1 free.
+static unsigned long strobe_slot_0xd(unsigned long entry) {
+  const unsigned long t = entry + 1;
+  return t + ((1u - t) & 3u);
+}
+
+static int check_strobe_shape(const char* name, const uint8_t* bytes,
+    const char* want_kinds, int port_kind, int derived, int settles_first) {
+  int failed = 0;
+  static const uint8_t masks[] = {0x0, 0xD};
+  for (unsigned mi = 0; mi < sizeof masks; mi++)
+  for (unsigned long entry = 0; entry < 4; entry++) {
+    z80 z;
+    z80_init(&z);
+    z.read_byte = strobe_rb;
+    z.write_byte = strobe_wb;
+    z.port_in = strobe_in;
+    z.port_out = strobe_out;
+    memset(memory, 0, MEMORY_SIZE);
+    memcpy(memory + 0x1000, bytes, 8);
+    z.pc = 0x1000;
+    z.sp = 0xF000;
+    z.a = 0x56;
+    z.b = 0x12;
+    z.c = 0x34;
+    z.t_counter = entry;
+    z.periodic_wait_mask = masks[mi];
+    if (derived)
+      z80_set_cyc_source(&z, Z80_CYC_FROM_WAIT_SLOTS);
+    strobe_cpu = &z;
+    strobe_event_count = 0;
+    // HALT only settles into the halted path on the step after the one
+    // that executes it, so discard the executing step and check the next.
+    if (settles_first)
+      z80_step(&z);
+    const unsigned long base = strobe_cpu->t_counter;
+    strobe_event_count = 0;
+    z80_step(&z);
+    const unsigned long want_slot =
+        masks[mi] == 0 ? base + 1 : strobe_slot_0xd(base);
+    char where[96];
+    snprintf(where, sizeof where, "%s mask=%X entry=%lu%s", name,
+        masks[mi], base, derived ? " derived" : "");
+    if (z.step_m1_sample_tstate != want_slot) {
+      printf("*** ERROR %s: sample slot %lu (want %lu)\n", where,
+          z.step_m1_sample_tstate, want_slot);
+      failed = 1;
+    }
+    const size_t want_count = strlen(want_kinds);
+    if ((size_t)strobe_event_count != want_count) {
+      printf("*** ERROR %s: %d bus events (want %lu %s)\n", where,
+          strobe_event_count, (unsigned long)want_count, want_kinds);
+      failed = 1;
+      continue;
+    }
+    for (size_t i = 0; i < want_count; i++) {
+      if (strobe_events[i].kind != want_kinds[i]) {
+        printf("*** ERROR %s: event %lu kind %c (want %c)\n", where,
+            (unsigned long)i, strobe_events[i].kind, want_kinds[i]);
+        failed = 1;
+      }
+      const unsigned long bcs = strobe_events[i].start;
+      const unsigned long ws = strobe_events[i].sample;
+      if (strobe_events[i].iorq_begin != 2 * bcs + 2 ||
+          strobe_events[i].iorq_end != 2 * ws + 3 ||
+          strobe_events[i].wr_begin != 2 * bcs + 3 ||
+          strobe_events[i].wr_end != 2 * ws + 3) {
+        printf("*** ERROR %s: event %lu windows [%lu,%lu]/[%lu,%lu]"
+            " (want [%lu,%lu]/[%lu,%lu])\n", where, (unsigned long)i,
+            strobe_events[i].iorq_begin, strobe_events[i].iorq_end,
+            strobe_events[i].wr_begin, strobe_events[i].wr_end,
+            2 * bcs + 2, 2 * ws + 3, 2 * bcs + 3, 2 * ws + 3);
+        failed = 1;
+      }
+      const int want_a =
+          port_kind != 0 && strobe_events[i].kind == port_kind;
+      if (strobe_events[i].high_byte_from_a != want_a) {
+        printf("*** ERROR %s: event %lu high byte from A %d (want %d)\n",
+            where, (unsigned long)i,
+            strobe_events[i].high_byte_from_a, want_a);
+        failed = 1;
+      }
+    }
+    // The first M1 fetch opens at the step's entry T and samples the slot.
+    if (want_count > 0 && (strobe_events[0].start != base ||
+        strobe_events[0].sample != want_slot)) {
+      printf("*** ERROR %s: first fetch start/sample %lu/%lu"
+          " (want %lu/%lu)\n", where, strobe_events[0].start,
+          strobe_events[0].sample, base, want_slot);
+      failed = 1;
+    }
+  }
+  return failed;
+}
+
+// A trailing NMI acknowledge runs more bus cycles after the instruction;
+// the step's sample slot must still be the instruction's own.
+static int check_strobe_ack_slot(void) {
+  int failed = 0;
+  static const uint8_t masks[] = {0x0, 0xD};
+  for (unsigned mi = 0; mi < sizeof masks; mi++)
+  for (unsigned long entry = 0; entry < 4; entry++) {
+    z80 z;
+    z80_init(&z);
+    z.read_byte = strobe_rb;
+    z.write_byte = strobe_wb;
+    z.port_in = strobe_in;
+    z.port_out = strobe_out;
+    memset(memory, 0, MEMORY_SIZE);
+    memory[0x1000] = 0x00; // NOP, then the NMI acknowledge
+    z.pc = 0x1000;
+    z.sp = 0xF000;
+    z.t_counter = entry;
+    z.periodic_wait_mask = masks[mi];
+    z80_gen_nmi(&z);
+    strobe_cpu = &z;
+    strobe_event_count = 0;
+    z80_step(&z);
+    const unsigned long want_slot =
+        masks[mi] == 0 ? entry + 1 : strobe_slot_0xd(entry);
+    if (z.step_m1_sample_tstate != want_slot) {
+      printf("*** ERROR nmi mask=%X entry=%lu: sample slot %lu (want %lu)\n",
+          masks[mi], entry, z.step_m1_sample_tstate, want_slot);
+      failed = 1;
+    }
+  }
+  return failed;
+}
+
+static int run_strobe_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  static const uint8_t nop[] = {0x00, 0, 0, 0, 0, 0, 0, 0};
+  static const uint8_t ld_a_nn[] = {0x3A, 0x00, 0x20, 0, 0, 0, 0, 0};
+  static const uint8_t ld_nn_a[] = {0x32, 0x00, 0x20, 0, 0, 0, 0, 0};
+  static const uint8_t in_a_n[] = {0xDB, 0x34, 0, 0, 0, 0, 0, 0};
+  static const uint8_t out_n_a[] = {0xD3, 0x34, 0, 0, 0, 0, 0, 0};
+  static const uint8_t in_b_c[] = {0xED, 0x40, 0, 0, 0, 0, 0, 0};
+  static const uint8_t out_c_b[] = {0xED, 0x41, 0, 0, 0, 0, 0, 0};
+  static const uint8_t halt[] = {0x76, 0, 0, 0, 0, 0, 0, 0};
+  for (int derived = 0; derived < 2; derived++) {
+    r += check_strobe_shape("nop", nop, "m", 0, derived, 0);
+    r += check_strobe_shape("ld a,(nn)", ld_a_nn, "mrrr", 0, derived, 0);
+    r += check_strobe_shape("ld (nn),a", ld_nn_a, "mrrw", 0, derived, 0);
+    r += check_strobe_shape("in a,(n)", in_a_n, "mri", 'i', derived, 0);
+    r += check_strobe_shape("out (n),a", out_n_a, "mro", 'o', derived, 0);
+    r += check_strobe_shape("in b,(c)", in_b_c, "mmi", 0, derived, 0);
+    r += check_strobe_shape("out (c),b", out_c_b, "mmo", 0, derived, 0);
+    r += check_strobe_shape("halt", halt, "", 0, derived, 1);
+  }
+  r += check_strobe_ack_slot();
+  printf("*** strobe windows test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: test runner
 static int run_test(
     z80* const z, const char* filename, unsigned long cyc_expected) {
@@ -1600,6 +1823,9 @@ int main(int argc, char** argv) {
   }
   if (argc > 1 && strcmp(argv[1], "cycsource") == 0) {
     return run_cyc_source_test();
+  }
+  if (argc > 1 && strcmp(argv[1], "strobe") == 0) {
+    return run_strobe_test();
   }
 
   memory = malloc(MEMORY_SIZE);

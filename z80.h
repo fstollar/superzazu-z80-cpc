@@ -131,6 +131,19 @@ struct z80 {
                                   // recorded by z80_step before any
                                   // acknowledge. A host ticks the board up
                                   // to this T before checking interrupts.
+  unsigned long step_m1_sample_tstate; // WAIT sample slot of the step's
+                                       // first M1 fetch: the first slot at
+                                       // or after the entry T counter the
+                                       // mask leaves free (entry T plus one
+                                       // when the mask stretches nothing).
+                                       // Set once by z80_step on both
+                                       // cycle-count sources and left alone
+                                       // after, so a trailing acknowledge
+                                       // still sees the instruction's own.
+  bool port_high_byte_from_a; // set while a port callback runs for the
+                              // two shapes whose port address takes its
+                              // high byte from A (IN A,(n), OUT (n),A);
+                              // clear for every other bus cycle.
 
   uint16_t pc, sp, ix, iy; // special purpose registers
   uint16_t mem_ptr; // "wz" register
@@ -163,6 +176,22 @@ struct z80 {
   // Clear (the default): z80_step() checks at once, as before.
   bool int_check_by_host;
 };
+
+// One /IORQ or /WR strobe window of the running bus cycle, in half-T
+// counts (two per T-state): the strobe falls at begin and rises at end.
+// Read inside a bus callback; the edges follow bus_cycle_start and
+// wait_sample_t of the cycle then running.
+typedef struct {
+  unsigned long begin_half_tstates;
+  unsigned long end_half_tstates;
+} z80_strobe_window_t;
+
+// The running cycle's /IORQ window: twice the cycle start T plus two to
+// twice the WAIT sample slot plus three.
+z80_strobe_window_t z80_iorq_window(const z80* const z);
+// The running cycle's /WR window: twice the cycle start T plus three to
+// twice the WAIT sample slot plus three.
+z80_strobe_window_t z80_write_window(const z80* const z);
 
 void z80_init(z80* const z);
 void z80_step(z80* const z);
