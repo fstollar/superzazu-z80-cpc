@@ -871,11 +871,12 @@ static inline uint16_t displace(
 static inline void process_interrupts(z80* const z) {
   // An NMI/IM1/IM2 acknowledge is charged like a step, from the slot the
   // next opcode fetch would have sampled to the slot after the
-  // acknowledge. The start slot is recorded up front; the end charge
-  // below re-reads the free phase from the live mask, the way the WAIT
-  // line itself is sampled live, so under a mid-step mask change the two
-  // ends may disagree. IM 0 keeps the table, its instruction runs off
-  // the bus.
+  // acknowledge. The start slot is recorded up front so the end charge
+  // below spans the whole acknowledge. Both ends use the free phase read
+  // from the live mask here, at acknowledge entry, not the phase the step
+  // latched, so a callback that changed the mask during the step moves
+  // the acknowledge with it. IM 0 keeps the table, its instruction runs
+  // off the bus.
   const bool ack_derived = !cyc_table_now(z);
   const unsigned ack_free_phase =
       ack_derived ? wait_free_phase(z->periodic_wait_mask) : 0;
@@ -900,7 +901,7 @@ static inline void process_interrupts(z80* const z) {
       z->cyc += z->timing->nmi_ack;
     call(z, 0x66);
     if (ack_derived)
-      z->cyc += (align_free_slot(z->t_counter + 1, wait_free_phase(z->periodic_wait_mask)) -
+      z->cyc += (align_free_slot(z->t_counter + 1, ack_free_phase) -
           ack_start_slot) / 4;
     return;
   }
@@ -958,7 +959,7 @@ static inline void process_interrupts(z80* const z) {
         z->cyc += z->timing->int_ack_im1;
       call(z, 0x38);
       if (ack_derived)
-        z->cyc += (align_free_slot(z->t_counter + 1, wait_free_phase(z->periodic_wait_mask)) -
+        z->cyc += (align_free_slot(z->t_counter + 1, ack_free_phase) -
             ack_start_slot) / 4;
       break;
 
@@ -991,7 +992,7 @@ static inline void process_interrupts(z80* const z) {
       z->pc = vec;
       z->mem_ptr = vec;
       if (ack_derived)
-        z->cyc += (align_free_slot(z->t_counter + 1, wait_free_phase(z->periodic_wait_mask)) -
+        z->cyc += (align_free_slot(z->t_counter + 1, ack_free_phase) -
             ack_start_slot) / 4;
       break;
     }
