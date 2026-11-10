@@ -1081,10 +1081,7 @@ static int check_cyc_source(const char* name, uint8_t opcode, z80_cyc_source_t s
 // The step runs in a forked child under alarm(): before the fix the child
 // hangs and the alarm kills it, after it the child steps one unstretched
 // NOP and exits clean.
-static int check_wait_mask_no_free_phase(void) {
-  const char* name = "mask 0xF";
-  memset(memory, 0, MEMORY_SIZE);
-  memory[0x0000] = 0x00; // nop
+static int check_wait_mask_no_free_phase_case(const char* name, int phase) {
   const pid_t pid = fork();
   if (pid < 0) {
     printf("*** ERROR %s: fork failed\n", name);
@@ -1100,15 +1097,28 @@ static int check_wait_mask_no_free_phase(void) {
     z.port_out = out;
     z.pc = 0;
     z.periodic_wait_mask = 0xF;
+    if (phase == 2)
+      z80_set_cyc_source(&z, Z80_CYC_FROM_WAIT_SLOTS);
     z80_step(&z);
-    // One unstretched M1 fetch: 4 T, the table charge, pc advanced by one.
+    if (phase == 0) {
+      // One unstretched M1 fetch: 4 T, the table charge, pc advanced by one.
+      _exit(z.t_counter == 4 && z.cyc == 4 && z.pc == 1 ? 0 : 2);
+    }
+    if (phase == 1) {
+      // A device hold after the step adds its T and resumes sampling past
+      // it instead of hanging: the recorded clear slot is not a real one
+      // under this mask, but there is nothing to stretch on.
+      z80_add_wait_states(&z, 2);
+      _exit(z.t_counter == 6 && z.cyc == 4 && z.pc == 1 ? 0 : 2);
+    }
+    // With no free phase the derived source falls back to the table.
     _exit(z.t_counter == 4 && z.cyc == 4 && z.pc == 1 ? 0 : 2);
   }
   int status = 0;
   if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
       WEXITSTATUS(status) != 0) {
     if (WIFEXITED(status))
-      printf("*** ERROR %s: child exited %d (expected a 4T/4cyc step)\n",
+      printf("*** ERROR %s: child exited %d (expected an unstretched step)\n",
           name, WEXITSTATUS(status));
     else
       printf("*** ERROR %s: child did not finish (WAIT stretched forever)\n",
@@ -1116,6 +1126,16 @@ static int check_wait_mask_no_free_phase(void) {
     return 1;
   }
   return 0;
+}
+
+static int check_wait_mask_no_free_phase(void) {
+  memset(memory, 0, MEMORY_SIZE);
+  memory[0x0000] = 0x00; // nop
+  int r = 0;
+  r += check_wait_mask_no_free_phase_case("mask 0xF", 0);
+  r += check_wait_mask_no_free_phase_case("mask 0xF hold", 1);
+  r += check_wait_mask_no_free_phase_case("mask 0xF derived", 2);
+  return r;
 }
 
 static int run_cyc_source_test(void) {
@@ -1197,27 +1217,61 @@ static void init_ack_cpu(z80* const z) {
 }
 
 // Flag clear: the step accepts as before, and the hook runs inside the INTA
-// cycle: bus_cycle_start is its first T (past the NOP fetch), wait_sample_t
-// its clear WAIT sample slot, and the T counter sits six T past the start.
-static int check_hostcheck_clear(void) {
-  const char* name = "flag clear";
+// cycle: bus_cycle_start is its first T, wait_sample_t its clear WAIT sample
+// slot, and the T counter sits six T past the start. The mask-0xD row pins
+// the clear slot past a stretch; NMI never calls the hook.
+static int check_ack_sighting(const char* name, int mode, uint8_t data,
+    uint8_t mask, unsigned long exp_bus, unsigned long exp_sample,
+    unsigned long exp_t, uint16_t exp_pc) {
   z80 z;
   init_ack_cpu(&z);
-  z80_gen_int(&z, 0xFF);
+  z.interrupt_mode = (uint8_t)mode;
+  z.i = 0x10;
+  memory[0x1020] = 0x34;
+  memory[0x1021] = 0x12;
+  z.periodic_wait_mask = mask;
+  z80_gen_int(&z, data);
   z80_step(&z);
-  if (z.pc != 0x0038 || z.int_pending || ack_calls != 1) {
+  if (z.pc != exp_pc || z.int_pending || ack_calls != 1) {
     printf("*** ERROR %s: pc %04X int_pending %d calls %d"
-        " (expected 0038 0 1)\n", name, z.pc, z.int_pending, ack_calls);
+        " (expected %04X 0 1)\n", name, z.pc, z.int_pending, ack_calls,
+        exp_pc);
     return 1;
   }
-  if (ack_bus_start != 4 || ack_sample_t != ack_bus_start + 3 ||
-      ack_t_counter != ack_bus_start + 6) {
+  if (ack_bus_start != exp_bus || ack_sample_t != exp_sample ||
+      ack_t_counter != exp_t) {
     printf("*** ERROR %s: bus_start %lu sample %lu t %lu"
-        " (expected 4 +3 +6)\n", name, ack_bus_start, ack_sample_t,
-        ack_t_counter);
+        " (expected %lu %lu %lu)\n", name, ack_bus_start, ack_sample_t,
+        ack_t_counter, exp_bus, exp_sample, exp_t);
     return 1;
   }
   return 0;
+}
+
+static int check_hostcheck_clear(void) {
+  int r = 0;
+  // IM1 with no stretch: the INTA opens past the NOP fetch.
+  r += check_ack_sighting("flag clear im1", 1, 0xFF, 0x0, 4, 7, 10, 0x0038);
+  // IM0 runs a NOP off the frozen bus; the hook still sees the INTA.
+  r += check_ack_sighting("flag clear im0", 0, 0x00, 0x0, 4, 7, 10, 0x0001);
+  // IM2 reads its vector at 0x1020; the hook still sees the INTA first.
+  r += check_ack_sighting("flag clear im2", 2, 0x20, 0x0, 4, 7, 10, 0x1234);
+  // IM1 under mask 0xD: the INTA sample stretches to the clear slot.
+  r += check_ack_sighting("flag clear mask d", 1, 0xFF, 0xD, 4, 9, 12,
+      0x0038);
+  // NMI takes 0x66 with no hook call: the hook is maskable-only.
+  {
+    z80 z;
+    init_ack_cpu(&z);
+    z80_gen_nmi(&z);
+    z80_step(&z);
+    if (z.pc != 0x0066 || z.nmi_pending || ack_calls != 0) {
+      printf("*** ERROR nmi: pc %04X nmi_pending %d calls %d"
+          " (expected 0066 0 0)\n", z.pc, z.nmi_pending, ack_calls);
+      r += 1;
+    }
+  }
+  return r;
 }
 
 // Flag set: the step leaves the pending interrupt and pc alone; the host's

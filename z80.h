@@ -119,7 +119,8 @@ struct z80 {
                               // over the T counter, a set bit asserting WAIT
                               // at that T. The core stretches each bus cycle
                               // at its sample T out to the next clear slot;
-                              // mask 0 (the default) stretches nothing. The
+                              // mask 0 (the default) stretches nothing, and a
+                              // mask with no clear slot is ignored. The
                               // board owns the pattern.
   unsigned long wait_sample_t; // clear sample slot of the running bus
                                // cycle: the sample T advanced past any
@@ -155,9 +156,10 @@ struct z80 {
   bool halted : 1;
   bool int_pending : 1, nmi_pending : 1;
   uint8_t im0_active; // internal: set while an IM 0 instruction runs off the bus
-  // When set, z80_step() returns right after recording int_sample_point,
-  // without its trailing interrupt check: the host brings its INT and NMI
-  // inputs up to that T and then calls z80_check_interrupt() itself.
+  // When set, z80_step() skips its trailing interrupt check after recording
+  // int_sample_point (its Q latch still runs first): the host brings its INT
+  // and NMI inputs up to that T and then calls z80_check_interrupt() itself,
+  // which latches Q for an IM0 acknowledge run there the same way.
   // Clear (the default): z80_step() checks at once, as before.
   bool int_check_by_host;
 };

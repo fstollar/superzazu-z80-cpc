@@ -12,7 +12,7 @@
 // M1 or memory cycle and in the 3rd T of a port cycle (the fetch and memory
 // strobe edges are the Z80_STROBE_WAIT_M1/Z80_STROBE_WAIT_PORT constants
 // in z80.h). Mask 0 skips the loop, so the T counts do not move. A mask
-// with no clear bit waits forever, as the hardware does on a stuck WAIT.
+// with no clear bit is ignored (see apply_sampled_waits).
 // The clear sample slot is recorded for dynamic holds to resume from.
 static inline void apply_sampled_waits(z80* const z, unsigned long sample_t) {
   const unsigned long mask = z->periodic_wait_mask;
@@ -889,7 +889,7 @@ static inline void process_interrupts(z80* const z) {
       // once per M1 by exec_opcode and the prefix handlers.
       //
       // The INTA cycle and the off-bus bytes run with no host memory
-      // callback; the INTA cycle runs the acknowledge hook above. The
+      // callback; the INTA cycle runs the acknowledge hook below. The
       // instruction body then accounts for the rest.
       inta(z);
       if (z->int_ack)
