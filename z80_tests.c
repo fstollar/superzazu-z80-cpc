@@ -1909,21 +1909,26 @@ static int run_ackcyc_test(void) {
   if (memory == NULL) {
     return 1;
   }
-  int r = 0;
-  // The instruction span (NOP one period, INC BC two) plus the acknowledge
-  // span.
-  r += check_ack_span("nop im1", 1, 0, 0x00, 0xFF, 6, 0x0038);
-  r += check_ack_span("nop im2", 2, 0, 0x00, 0x20, 8, 0x1234);
-  r += check_ack_span("nop nmi", 0, 1, 0x00, 0xFF, 5, 0x0066);
-  r += check_ack_span("incbc im1", 1, 0, 0x03, 0xFF, 6, 0x0038);
-  r += check_ack_span("incbc im2", 2, 0, 0x03, 0x20, 8, 0x1234);
-  r += check_ack_span("incbc nmi", 0, 1, 0x03, 0xFF, 6, 0x0066);
+  int mismatches = 0;
+  // The instruction span (NOP one period, INC BC two, the halted filler
+  // one) plus the acknowledge span.
+  mismatches += check_ack_span("nop im1", 1, 0, 0x00, 0xFF, 6, 0x0038);
+  mismatches += check_ack_span("nop im2", 2, 0, 0x00, 0x20, 8, 0x1234);
+  mismatches += check_ack_span("nop nmi", 0, 1, 0x00, 0xFF, 5, 0x0066);
+  mismatches += check_ack_span("incbc im1", 1, 0, 0x03, 0xFF, 6, 0x0038);
+  mismatches += check_ack_span("incbc im2", 2, 0, 0x03, 0x20, 8, 0x1234);
+  mismatches += check_ack_span("incbc nmi", 0, 1, 0x03, 0xFF, 6, 0x0066);
+  // A halted step runs 4 internal T before the trailing acknowledge, so
+  // each total is one 4-T period above the acknowledge span: 6/8/5.
+  mismatches += check_ack_span("halt im1", 1, 0, 0x76, 0xFF, 6, 0x0038);
+  mismatches += check_ack_span("halt im2", 2, 0, 0x76, 0x20, 8, 0x1234);
+  mismatches += check_ack_span("halt nmi", 0, 1, 0x76, 0xFF, 5, 0x0066);
   // IM 0 keeps the table: the derived NOP span, the acknowledge table
   // charge, and the off-bus NOP's own table charge.
-  r += check_ack_span("nop im0", 0, 0, 0x00, 0x00, 3, 0x0001);
-  printf("*** acknowledge charge test: %s\n", r == 0 ? "OK" : "FAILED");
+  mismatches += check_ack_span("nop im0", 0, 0, 0x00, 0x00, 3, 0x0001);
+  printf("*** acknowledge charge test: %s\n", mismatches == 0 ? "OK" : "FAILED");
   free(memory);
-  return r != 0;
+  return mismatches != 0;
 }
 
 // MARK: test runner
