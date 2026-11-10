@@ -92,6 +92,10 @@ struct z80 {
                               // at its sample T out to the next clear slot;
                               // mask 0 (the default) stretches nothing. The
                               // board owns the pattern.
+  unsigned long wait_sample_t; // clear sample slot of the running bus
+                               // cycle: the sample T advanced past any
+                               // asserted bits. A dynamic hold re-applies
+                               // the mask from this slot plus the held T.
   unsigned long int_sample_point; // last T of the stepped instruction:
                                   // the T at which the core samples INT,
                                   // recorded by z80_step before any

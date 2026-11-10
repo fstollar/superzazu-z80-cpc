@@ -13,12 +13,14 @@
 // strobe edges are the Z80_STROBE_WAIT_M1/Z80_STROBE_WAIT_PORT constants
 // in z80.h). Mask 0 skips the loop, so the T counts do not move. A mask
 // with no clear bit waits forever, as the hardware does on a stuck WAIT.
+// The clear sample slot is recorded for dynamic holds to resume from.
 static inline void apply_sampled_waits(z80* const z, unsigned long sample_t) {
   const unsigned long mask = z->periodic_wait_mask;
   while ((mask >> (sample_t & 3u)) & 1u) {
     z->t_counter++;
     sample_t++;
   }
+  z->wait_sample_t = sample_t;
 }
 
 // Interrupt-acknowledge M1: six T with two automatic waits, sampled at the
@@ -911,6 +913,7 @@ void z80_init(z80* const z) {
   z->t_counter = 0;
   z->bus_cycle_start = 0;
   z->periodic_wait_mask = 0;
+  z->wait_sample_t = 0;
   z->int_sample_point = 0;
   z->timing = &z80_timing_generic;
 
@@ -997,10 +1000,13 @@ void z80_add_wait_states(z80* const z, unsigned n) {
   if (n == 0)
     return;
   z->t_counter += n;
-  // The device released WAIT, but the board can still hold it: sample the
-  // periodic mask from the T after the hold lands, stretching to the next
-  // clear slot like any bus cycle does.
-  apply_sampled_waits(z, z->t_counter + 1);
+  // The device released WAIT, but the board can still hold it: resume
+  // sampling the periodic mask from the cycle's own clear sample slot
+  // plus the held T, stretching to the next clear slot like any bus
+  // cycle does. The n == 0 guard stays: before any bus cycle ran, the
+  // recorded slot is the reset value, not a real clear slot, so even a
+  // zero hold would stretch on a mask with bit 0 set.
+  apply_sampled_waits(z, z->wait_sample_t + n);
 }
 
 // outputs to stdout a debug trace of the emulator

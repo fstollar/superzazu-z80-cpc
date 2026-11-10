@@ -695,6 +695,109 @@ static void im0_prefix_cases(void) {
   }
 }
 
+/* The T path never reads the timing table (F3 cover): the same steps run
+   under the CPC microsecond table must still advance the generic T count.
+   Only totals and PCs are pinned here; callbacks and starts are identical
+   on either table and covered above. */
+static void cpc_t_check(const char *label, z80 *z, unsigned want_t,
+                         uint16_t want_pc) {
+  unsigned before = READ_T_COUNTER(z);
+  z80_step(z);
+  unsigned delta = READ_T_COUNTER(z) - before;
+  if (delta != want_t) {
+    printf("FAIL %s: T is %u under the CPC table, generic cost is %u\n", label, delta, want_t);
+    ++failures;
+  }
+  check_pc(label, z, want_pc);
+}
+
+static void cpc_table_cases(void) {
+  z80 z;
+  /* DJNZ taken: 13 T. */
+  set_base(&z);
+  z.timing = &z80_timing_cpc;
+  z.b = 2;
+  uint8_t code_djnz[2] = {0x10, 0x04};
+  load_bytes(code_djnz, 2);
+  begin_step(&z);
+  cpc_t_check("cpc djnz taken", &z, 13, 0x1006);
+  /* JR taken: 12 T. */
+  set_base(&z);
+  z.timing = &z80_timing_cpc;
+  z.zf = 0;
+  uint8_t code_jr[2] = {0x20, 0x04};
+  load_bytes(code_jr, 2);
+  begin_step(&z);
+  cpc_t_check("cpc jr nz taken", &z, 12, 0x1006);
+  /* JR NC taken: 12 T. */
+  set_base(&z);
+  z.timing = &z80_timing_cpc;
+  z.cf = 0;
+  uint8_t code_jrnc[2] = {0x30, 0x04};
+  load_bytes(code_jrnc, 2);
+  begin_step(&z);
+  cpc_t_check("cpc jr nc taken", &z, 12, 0x1006);
+  /* LDIR repeating: 21 T. */
+  set_base(&z);
+  z.timing = &z80_timing_cpc;
+  z.b = 0;
+  z.c = 2;
+  uint8_t code_ldir[2] = {0xED, 0xB0};
+  load_bytes(code_ldir, 2);
+  begin_step(&z);
+  cpc_t_check("cpc ldir repeat", &z, 21, 0x1000);
+  /* CPIR repeating: 21 T. */
+  set_base(&z);
+  z.timing = &z80_timing_cpc;
+  z.b = 0;
+  z.c = 2;
+  ram[0x4000] = 1;
+  uint8_t code_cpir[2] = {0xED, 0xB1};
+  load_bytes(code_cpir, 2);
+  begin_step(&z);
+  cpc_t_check("cpc cpir repeat", &z, 21, 0x1000);
+  /* Acknowledges: NMI 15, IM0 10, IM1 17, IM2 23 T. */
+  set_base(&z);
+  z.timing = &z80_timing_cpc;
+  z.iff1 = 1;
+  uint8_t code_nop[1] = {0x00};
+  load_bytes(code_nop, 1);
+  z80_gen_nmi(&z);
+  begin_step(&z);
+  cpc_t_check("cpc nmi", &z, 15, 0x0066);
+  set_base(&z);
+  z.timing = &z80_timing_cpc;
+  z.iff1 = 1;
+  z.interrupt_mode = 0;
+  load_bytes(code_nop, 1);
+  z80_gen_int(&z, 0x00);
+  begin_step(&z);
+  cpc_t_check("cpc im0", &z, 10, 0x1001);
+  set_base(&z);
+  z.timing = &z80_timing_cpc;
+  z.iff1 = 1;
+  z.interrupt_mode = 1;
+  load_bytes(code_nop, 1);
+  z80_gen_int(&z, 0x00);
+  begin_step(&z);
+  cpc_t_check("cpc im1", &z, 17, 0x0038);
+  set_base(&z);
+  z.timing = &z80_timing_cpc;
+  z.iff1 = 1;
+  z.interrupt_mode = 2;
+  z.i = 0x12;
+  ram[0x1234] = 0x78;
+  ram[0x1235] = 0x56;
+  load_bytes(code_nop, 1);
+  z80_gen_int(&z, 0x34);
+  begin_step(&z);
+  cpc_t_check("cpc im2", &z, 23, 0x5678);
+  if (z.iff1) {
+    printf("FAIL cpc acks: iff1 still set after acknowledge\n");
+    ++failures;
+  }
+}
+
 /* The acknowledge modes the test drives: NMI, IM0, IM1, IM2. A NOP runs
    first, then the acknowledge; the IM0 byte is a NOP so nothing else
    executes. Rows start with the NOP's 4 T fetch; the acknowledge
@@ -760,6 +863,7 @@ int main(void) {
   ix_d_n_case();
   ix_d_read_cases();
   im0_prefix_cases();
+  cpc_table_cases();
   ack_cases();
   if (failures == 0)
     printf("tstate: all cases pass\n");
