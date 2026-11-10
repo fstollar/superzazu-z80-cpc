@@ -84,8 +84,18 @@ struct z80 {
                            // bus plus internal T always equals the generic
                            // table cost the core charges to cyc above.
   unsigned long bus_cycle_start; // absolute T of the bus cycle now running;
-                                 // valid inside each bus callback (read,
-                                 // write, port, im0 follow-on).
+                                  // valid inside each bus callback (read,
+                                  // write, port, im0 follow-on).
+  uint8_t periodic_wait_mask; // WAIT pin waveform: a 4-bit periodic mask
+                              // over the T counter, a set bit asserting WAIT
+                              // at that T. The core stretches each bus cycle
+                              // at its sample T out to the next clear slot;
+                              // mask 0 (the default) stretches nothing. The
+                              // board owns the pattern.
+  unsigned long int_sample_point; // end T of the stepped instruction: the T
+                                  // at which the core samples INT, recorded
+                                  // by z80_step. A host ticks the board up
+                                  // to this T before checking interrupts.
 
   uint16_t pc, sp, ix, iy; // special purpose registers
   uint16_t mem_ptr; // "wz" register
@@ -119,6 +129,11 @@ void z80_debug_output(z80* const z);
 void z80_gen_nmi(z80* const z);
 void z80_gen_int(z80* const z, uint8_t data);
 void z80_set_timing(z80* const z, const z80_timing_t* timing);
+
+// Adds n T-states to the running bus cycle from inside one of its
+// callbacks, for a device that holds WAIT itself. Only the T counter
+// moves; the microsecond count is untouched.
+void z80_add_wait_states(z80* const z, unsigned n);
 
 // Services any pending NMI/interrupt immediately, without executing another
 // instruction first. z80_step() already calls this internally as its

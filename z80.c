@@ -6,10 +6,26 @@
 // get bit "n" of number "val"
 #define GET_BIT(n, val) (((val) >> (n)) & 1)
 
+// Applies the WAIT mask at one bus cycle's sample T. A set bit holds the
+// cycle one T and the sample repeats, so the cycle stretches out to the
+// next clear slot; internal T never stretches. The sample sits in T2 of an
+// M1 or memory cycle and in the 3rd T of a port cycle (the fetch and memory
+// strobe edges are the Z80_STROBE_WAIT_M1/Z80_STROBE_WAIT_PORT constants
+// in z80.h). Mask 0 skips the loop, so the T counts do not move. A mask
+// with no clear bit waits forever, as the hardware does on a stuck WAIT.
+static inline void apply_sampled_waits(z80* const z, unsigned long sample_t) {
+  const unsigned long mask = z->periodic_wait_mask;
+  while ((mask >> (sample_t & 3u)) & 1u) {
+    z->t_counter++;
+    sample_t++;
+  }
+}
+
 static inline uint8_t rb(z80* const z, uint16_t addr) {
   // data -- every HL/BC/DE/IX+d/nn operand, stack pop,
   // ex (sp),hl and block-op byte. A data read holds the bus for 3 T.
   z->bus_cycle_start = z->t_counter;
+  apply_sampled_waits(z, z->t_counter + 1);
   z->t_counter += 3;
   return z->read_byte(z->userdata, addr, Z80_READ_DATA);
 }
@@ -18,6 +34,7 @@ static inline uint8_t rb(z80* const z, uint16_t addr) {
 // rb() above, tagged so the host can tell it apart.
 static inline uint8_t rb_im2(z80* const z, uint16_t addr) {
   z->bus_cycle_start = z->t_counter;
+  apply_sampled_waits(z, z->t_counter + 1);
   z->t_counter += 3;
   return z->read_byte(z->userdata, addr, Z80_READ_IM2_VECTOR);
 }
@@ -25,6 +42,7 @@ static inline uint8_t rb_im2(z80* const z, uint16_t addr) {
 static inline void wb(z80* const z, uint16_t addr, uint8_t val) {
   // A data write holds the bus for 3 T, like a data read.
   z->bus_cycle_start = z->t_counter;
+  apply_sampled_waits(z, z->t_counter + 1);
   z->t_counter += 3;
   z->write_byte(z->userdata, addr, val);
 }
@@ -62,11 +80,13 @@ static inline uint8_t nextb(z80* const z) {
   if (z->im0_active) {
     // IM 0: operand bytes are normal memory reads at the frozen PC.
     z->bus_cycle_start = z->t_counter;
+    apply_sampled_waits(z, z->t_counter + 1);
     z->t_counter += 3;
     return z->im0_bus ? z->im0_bus(z, z->pc, Z80_IM0_READ)
                       : z->read_byte(z->userdata, z->pc, Z80_READ_OPERAND);
   }
   z->bus_cycle_start = z->t_counter;
+  apply_sampled_waits(z, z->t_counter + 1);
   z->t_counter += 3;
   return z->read_byte(z->userdata, z->pc++, Z80_READ_OPERAND);
 }
@@ -78,11 +98,13 @@ static inline uint16_t nextw(z80* const z) {
   if (z->im0_active) {
     // IM 0: both bytes are read at the frozen PC, low byte first.
     z->bus_cycle_start = z->t_counter;
+    apply_sampled_waits(z, z->t_counter + 1);
     z->t_counter += 3;
     const uint8_t lo = z->im0_bus
         ? z->im0_bus(z, z->pc, Z80_IM0_READ)
         : z->read_byte(z->userdata, z->pc, Z80_READ_OPERAND);
     z->bus_cycle_start = z->t_counter;
+    apply_sampled_waits(z, z->t_counter + 1);
     z->t_counter += 3;
     const uint8_t hi = z->im0_bus
         ? z->im0_bus(z, z->pc, Z80_IM0_READ)
@@ -104,11 +126,13 @@ static inline uint8_t fetchb(z80* const z) {
     // cycle -- no PC increment. It runs no host memory callback, but its
     // acknowledge overhead still takes its T count.
     z->bus_cycle_start = z->t_counter;
+    apply_sampled_waits(z, z->t_counter + 1);
     z->t_counter += z->timing->int_ack_im0;
     z->cyc += z->timing->int_ack_im0;
     return z->im0_bus ? z->im0_bus(z, z->pc, Z80_IM0_INTA) : 0xFF;
   }
   z->bus_cycle_start = z->t_counter;
+  apply_sampled_waits(z, z->t_counter + 1);
   z->t_counter += 4;
   return z->read_byte(z->userdata, z->pc++, Z80_READ_M1);
 }
@@ -116,12 +140,14 @@ static inline uint8_t fetchb(z80* const z) {
 // A port access holds the bus for 4 T (3 bus T plus the automatic wait T).
 static inline uint8_t port_rd(z80* const z, uint16_t port) {
   z->bus_cycle_start = z->t_counter;
+  apply_sampled_waits(z, z->t_counter + 2);
   z->t_counter += 4;
   return z->port_in(z, port);
 }
 
 static inline void port_wr(z80* const z, uint16_t port, uint8_t val) {
   z->bus_cycle_start = z->t_counter;
+  apply_sampled_waits(z, z->t_counter + 2);
   z->t_counter += 4;
   z->port_out(z, port, val);
 }
@@ -873,6 +899,8 @@ void z80_init(z80* const z) {
   z->cyc = 0;
   z->t_counter = 0;
   z->bus_cycle_start = 0;
+  z->periodic_wait_mask = 0;
+  z->int_sample_point = 0;
   z->timing = &z80_timing_generic;
 
   z->pc = 0;
@@ -940,12 +968,22 @@ void z80_step(z80* const z) {
 
   process_interrupts(z);
 
+  // The T at which the core samples INT: the end T of the stepped
+  // instruction (any acknowledge included). The host ticks the board up to
+  // this T before checking interrupts; until it does, the trailing check
+  // above keeps today's whole-instruction behaviour.
+  z->int_sample_point = z->t_counter;
+
   // The Q latch: F when the step wrote the flags, else 0.
   z->q = z->flags_written ? get_f(z) : 0;
 }
 
 void z80_check_interrupt(z80* const z) {
   process_interrupts(z);
+}
+
+void z80_add_wait_states(z80* const z, unsigned n) {
+  z->t_counter += n;
 }
 
 // outputs to stdout a debug trace of the emulator
@@ -1524,19 +1562,22 @@ void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
   case 0x2B: internal(z, 2); *iz -= 1; break; // dec iz
 
   case 0x34: {
-    // Read-modify-write: the read lands in M4, the write in M6, with the
-    // modify and one extra internal T in between (4,4,3,5,4,3 shape).
+    // Read-modify-write: the displacement-add internal T runs ahead of
+    // the M4 read, one internal T sits between the read and the write
+    // (4,4,3,5,4,3 shape).
     uint16_t addr = IZD;
+    internal(z, 5);
     uint8_t result = inc(z, rb(z, addr));
-    internal(z, 6);
+    internal(z, 1);
     wb(z, addr, result);
   } break; // inc (iz+*)
 
   case 0x35: {
     // Same read-modify-write shape as inc (iz+*) above.
     uint16_t addr = IZD;
+    internal(z, 5);
     uint8_t result = dec(z, rb(z, addr));
-    internal(z, 6);
+    internal(z, 1);
     wb(z, addr, result);
   } break; // dec (iz+*)
 
@@ -1566,16 +1607,15 @@ void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
     wb(z, addr, n);
   } break; // ld (iz+*),*
 
-  // Indexed accesses land in M4 with five internal T behind them (the
-  // displacement read, the (iz+d) access and one internal T fill the
-  // 4,4,3,5,3 shape; the remaining three internal T close M5).
-  case 0x70: wb(z, IZD, z->b); internal(z, 5); break; // ld (iz+*),b
-  case 0x71: wb(z, IZD, z->c); internal(z, 5); break; // ld (iz+*),c
-  case 0x72: wb(z, IZD, z->d); internal(z, 5); break; // ld (iz+*),d
-  case 0x73: wb(z, IZD, z->e); internal(z, 5); break; // ld (iz+*),e
-  case 0x74: wb(z, IZD, z->h); internal(z, 5); break; // ld (iz+*),h
-  case 0x75: wb(z, IZD, z->l); internal(z, 5); break; // ld (iz+*),l
-  case 0x77: wb(z, IZD, z->a); internal(z, 5); break; // ld (iz+*),a
+  // Indexed stores: the displacement-add internal T runs after the
+  // displacement read, ahead of the M5 write (4,4,3,5,3 shape).
+  case 0x70: { uint16_t addr = IZD; internal(z, 5); wb(z, addr, z->b); } break; // ld (iz+*),b
+  case 0x71: { uint16_t addr = IZD; internal(z, 5); wb(z, addr, z->c); } break; // ld (iz+*),c
+  case 0x72: { uint16_t addr = IZD; internal(z, 5); wb(z, addr, z->d); } break; // ld (iz+*),d
+  case 0x73: { uint16_t addr = IZD; internal(z, 5); wb(z, addr, z->e); } break; // ld (iz+*),e
+  case 0x74: { uint16_t addr = IZD; internal(z, 5); wb(z, addr, z->h); } break; // ld (iz+*),h
+  case 0x75: { uint16_t addr = IZD; internal(z, 5); wb(z, addr, z->l); } break; // ld (iz+*),l
+  case 0x77: { uint16_t addr = IZD; internal(z, 5); wb(z, addr, z->a); } break; // ld (iz+*),a
 
   case 0x46: z->b = rb(z, IZD); internal(z, 5); break; // ld b,(iz+*)
   case 0x4E: z->c = rb(z, IZD); internal(z, 5); break; // ld c,(iz+*)
