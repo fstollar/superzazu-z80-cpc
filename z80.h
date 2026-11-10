@@ -54,6 +54,7 @@ typedef enum {
 // conditional table charges are skipped, while NMI/IM1/IM2 acknowledges
 // are charged from their own sampled slots; IM 0 keeps the table. The
 // mode applies to a step only when the WAIT mask leaves exactly one phase
+// free; otherwise the step falls back to the table.
 typedef enum {
   Z80_CYC_FROM_TABLE = 0,
   Z80_CYC_FROM_WAIT_SLOTS = 1
