@@ -1018,6 +1018,22 @@ static int run_push_order_test(void) {
     r += 1;
   }
 
+  // ex (sp),hl reads the stack pair, then writes the high byte to SP + 1
+  // ahead of the low byte to SP.
+  init_push_cpu(&z);
+  memory[0x0000] = 0xE3; // ex (sp),hl
+  memory[0x1000] = 0x78;
+  memory[0x1001] = 0x56;
+  z.h = 0x12;
+  z.l = 0x34;
+  z80_step(&z);
+  r += check_push_order("ex (sp),hl", 0x1001, 0x1000);
+  if (memory[0x1001] != 0x12 || memory[0x1000] != 0x34 || z.h != 0x56 || z.l != 0x78) {
+    printf("*** ERROR ex (sp),hl: stack %02X%02X hl %02X%02X (expected 1234 5678)\n",
+        memory[0x1001], memory[0x1000], z.h, z.l);
+    r += 1;
+  }
+
   printf("*** push order test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);
   return r != 0;
