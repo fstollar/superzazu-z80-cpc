@@ -899,6 +899,10 @@ static inline void process_interrupts(z80* const z) {
       q_clear(z);
       exec_opcode(z, z->int_data);
       z->im0_active = 0;
+      // The off-bus instruction latches Q like any step does: without this
+      // a host-driven check would leave the pre-step latch behind while
+      // the in-step check leaves the instruction's flags.
+      z->q = z->flags_written ? get_f(z) : 0;
       break;
 
     case 1:

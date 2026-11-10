@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -1325,6 +1326,37 @@ static int check_hostcheck_init(void) {
   return 0;
 }
 
+// Flag clear vs flag set with an IM0 data byte that writes the flags: the
+// acknowledge's Q latch must match. 0xAF is XOR A; with A seeded to 0xAF
+// the result is zero, so Q comes out Z+P (0x44).
+static int check_hostcheck_im0_q(void) {
+  const char* name = "im0 q latch";
+  z80 clear;
+  init_ack_cpu(&clear);
+  clear.interrupt_mode = 0;
+  clear.a = 0xAF;
+  z80_gen_int(&clear, 0xAF);
+  z80_step(&clear);
+  z80 host;
+  init_ack_cpu(&host);
+  host.interrupt_mode = 0;
+  host.a = 0xAF;
+  host.int_check_by_host = true;
+  z80_gen_int(&host, 0xAF);
+  z80_step(&host);
+  z80_check_interrupt(&host);
+  if (clear.q == 0) {
+    printf("*** ERROR %s: flag-clear q is 0, the test proves nothing\n", name);
+    return 1;
+  }
+  if (host.q != clear.q || host.pc != clear.pc) {
+    printf("*** ERROR %s: host q %02X pc %04X (clear q %02X pc %04X)\n",
+        name, host.q, host.pc, clear.q, clear.pc);
+    return 1;
+  }
+  return 0;
+}
+
 static int run_hostcheck_test(void) {
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
@@ -1335,9 +1367,107 @@ static int run_hostcheck_test(void) {
   r += check_hostcheck_set();
   r += check_hostcheck_ei();
   r += check_hostcheck_init();
+  r += check_hostcheck_im0_q();
   printf("*** host check test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);
   return r != 0;
+}
+
+// MARK: flag-clear vs flag-set equivalence sweep
+// Every combination of NMI, interrupt mode, data byte, WAIT mask, cycle
+// source and stepped instruction must end in the same whole-struct state
+// whether the acknowledge runs inside z80_step() or in a following
+// z80_check_interrupt() under int_check_by_host.
+static unsigned long equiv_cyc, equiv_bus, equiv_ws, equiv_t;
+static int equiv_calls;
+
+static void record_equiv(z80* const z) {
+  equiv_calls += 1;
+  equiv_cyc = z->cyc;
+  equiv_bus = z->bus_cycle_start;
+  equiv_ws = z->wait_sample_t;
+  equiv_t = z->t_counter;
+}
+
+static void setup_equiv(z80* const z, int mode, uint8_t data, uint8_t mask,
+    int derived, uint8_t op, int nmi) {
+  memset(z, 0, sizeof *z);
+  z80_init(z);
+  z->read_byte = rb;
+  z->write_byte = wb;
+  z->port_in = in;
+  z->port_out = out;
+  z->int_ack = record_equiv;
+  memset(memory, 0, MEMORY_SIZE);
+  memory[0x0000] = op;
+  memory[0x0001] = 0x00;
+  memory[0x3000] = 0x34;
+  memory[0x3001] = 0x12;
+  z->pc = 0;
+  z->sp = 0xF000;
+  z->i = 0x30;
+  z->interrupt_mode = (uint8_t)mode;
+  z->iff1 = 1;
+  z->iff2 = 1;
+  z->r = 0x7F;
+  z->periodic_wait_mask = mask;
+  z->t_counter = 2;
+  if (derived)
+    z80_set_cyc_source(z, Z80_CYC_FROM_WAIT_SLOTS);
+  z80_set_timing(z, &z80_timing_cpc);
+  if (nmi)
+    z80_gen_nmi(z);
+  else
+    z80_gen_int(z, data);
+  equiv_calls = 0;
+}
+
+static int run_hostequiv_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  static const uint8_t masks[] = {0x0, 0xD, 0x5, 0x7, 0xF};
+  static const uint8_t datas[] = {0xFF, 0xAF, 0x3C, 0xCB, 0x00, 0x37};
+  static const uint8_t ops[] = {0x00, 0x37, 0x3C, 0xFB, 0x76};
+  int bad = 0, total = 0;
+  for (int nmi = 0; nmi < 2; nmi++)
+  for (int mode = 0; mode < 3; mode++)
+  for (unsigned di = 0; di < sizeof datas; di++)
+  for (unsigned mi = 0; mi < sizeof masks; mi++)
+  for (int derived = 0; derived < 2; derived++)
+  for (unsigned oi = 0; oi < sizeof ops; oi++) {
+    if (nmi && (mode || di))
+      continue;
+    z80 clear_run, host_run;
+    total++;
+    setup_equiv(&clear_run, mode, datas[di], masks[mi], derived, ops[oi],
+        nmi);
+    z80_step(&clear_run);
+    const int clear_calls = equiv_calls;
+    const unsigned long clear_cyc = equiv_cyc, clear_bus = equiv_bus;
+    const unsigned long clear_ws = equiv_ws, clear_t = equiv_t;
+    setup_equiv(&host_run, mode, datas[di], masks[mi], derived, ops[oi],
+        nmi);
+    host_run.int_check_by_host = true;
+    z80_step(&host_run);
+    z80_check_interrupt(&host_run);
+    host_run.int_check_by_host = false;
+    if (memcmp(&clear_run, &host_run, sizeof clear_run) != 0 ||
+        clear_calls != equiv_calls ||
+        (clear_calls && (clear_cyc != equiv_cyc || clear_bus != equiv_bus ||
+            clear_ws != equiv_ws || clear_t != equiv_t))) {
+      bad++;
+      printf("*** ERROR equiv nmi=%d im%d data=%02X mask=%X derived=%d"
+          " op=%02X: q %02X vs %02X pc %04X/%04X t %lu/%lu cyc %lu/%lu\n",
+          nmi, mode, datas[di], masks[mi], derived, ops[oi], clear_run.q,
+          host_run.q, clear_run.pc, host_run.pc, clear_run.t_counter,
+          host_run.t_counter, clear_run.cyc, host_run.cyc);
+    }
+  }
+  printf("*** hostequiv: %d of %d cases differ\n", bad, total);
+  free(memory);
+  return bad != 0;
 }
 
 // MARK: test runner
@@ -1410,6 +1540,9 @@ int main(int argc, char** argv) {
   }
   if (argc > 1 && strcmp(argv[1], "hostcheck") == 0) {
     return run_hostcheck_test();
+  }
+  if (argc > 1 && strcmp(argv[1], "hostequiv") == 0) {
+    return run_hostequiv_test();
   }
   if (argc > 1 && strcmp(argv[1], "cycsource") == 0) {
     return run_cyc_source_test();
