@@ -877,9 +877,12 @@ static inline void process_interrupts(z80* const z) {
   // latched, so a callback that changed the mask during the step moves
   // the acknowledge with it. IM 0 keeps the table, its instruction runs
   // off the bus.
-  const bool ack_derived = !cyc_table_now(z);
+  const bool ack_latched_derived = !cyc_table_now(z);
   const unsigned ack_free_phase =
-      ack_derived ? wait_free_phase(z->periodic_wait_mask) : 0;
+      ack_latched_derived ? wait_free_phase(z->periodic_wait_mask) : 0;
+  // A mask changed mid-step to one without a single free phase gives no
+  // slot to align to: that acknowledge keeps its table charge.
+  const bool ack_derived = ack_latched_derived && ack_free_phase < 4;
   const unsigned long ack_start_slot =
       ack_derived ? align_free_slot(z->t_counter + 1, ack_free_phase) : 0;
   // NMI is recognised at the end of every instruction, whatever the

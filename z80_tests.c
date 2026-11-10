@@ -1880,12 +1880,14 @@ static int run_strobe_test(void) {
 // charge on top of the derived instruction span and the off-bus
 // instruction's own table charge.
 static int check_ack_span(const char* name, int mode, int nmi, uint8_t op,
-    uint8_t data, unsigned long exp_cyc, uint16_t exp_pc) {
+    uint8_t data, unsigned long exp_cyc, uint16_t exp_pc, int start_halted,
+    uint8_t wait_mask) {
   z80 z;
   init_ack_cpu(&z);
   z80_set_timing(&z, &z80_timing_cpc);
   z80_set_cyc_source(&z, Z80_CYC_FROM_WAIT_SLOTS);
-  z.periodic_wait_mask = 0xD;
+  z.periodic_wait_mask = wait_mask;
+  z.halted = (uint8_t)start_halted;
   z.interrupt_mode = (uint8_t)mode;
   z.i = 0x10;
   memory[0x0000] = op;
@@ -1904,6 +1906,38 @@ static int check_ack_span(const char* name, int mode, int nmi, uint8_t op,
   return 0;
 }
 
+// A read callback that moves the WAIT mask to one with two free phases
+// the first time it is called, i.e. during the step's opcode fetch.
+static uint8_t rb_mask_change(void* userdata, uint16_t addr,
+    z80_read_kind_t kind) {
+  (void)kind;
+  ((z80*)userdata)->periodic_wait_mask = 0x5;
+  return memory[addr];
+}
+
+// A mask changed mid-step to one with no single free phase: the
+// acknowledge keeps its table charge instead of aligning to a phase.
+static int check_ack_mask_change(void) {
+  z80 z;
+  init_ack_cpu(&z);
+  z.read_byte = rb_mask_change;
+  z.userdata = &z;
+  z80_set_timing(&z, &z80_timing_cpc);
+  z80_set_cyc_source(&z, Z80_CYC_FROM_WAIT_SLOTS);
+  z.periodic_wait_mask = 0xD;
+  z.i = 0x10;
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  // The NOP's derived period (1) plus the table IM 1 charge.
+  const unsigned long expected = 1 + z.timing->int_ack_im1;
+  if (z.cyc != expected || z.pc != 0x0038) {
+    printf("*** ERROR mask change im1: cyc %lu pc %04X (expected %lu 0038)\n",
+        z.cyc, z.pc, expected);
+    return 1;
+  }
+  return 0;
+}
+
 static int run_ackcyc_test(void) {
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
@@ -1912,20 +1946,21 @@ static int run_ackcyc_test(void) {
   int mismatches = 0;
   // The instruction span (NOP one period, INC BC two, the halted filler
   // one) plus the acknowledge span.
-  mismatches += check_ack_span("nop im1", 1, 0, 0x00, 0xFF, 6, 0x0038);
-  mismatches += check_ack_span("nop im2", 2, 0, 0x00, 0x20, 8, 0x1234);
-  mismatches += check_ack_span("nop nmi", 0, 1, 0x00, 0xFF, 5, 0x0066);
-  mismatches += check_ack_span("incbc im1", 1, 0, 0x03, 0xFF, 6, 0x0038);
-  mismatches += check_ack_span("incbc im2", 2, 0, 0x03, 0x20, 8, 0x1234);
-  mismatches += check_ack_span("incbc nmi", 0, 1, 0x03, 0xFF, 6, 0x0066);
+  mismatches += check_ack_span("nop im1", 1, 0, 0x00, 0xFF, 6, 0x0038, 0, 0xD);
+  mismatches += check_ack_span("nop im2", 2, 0, 0x00, 0x20, 8, 0x1234, 0, 0xD);
+  mismatches += check_ack_span("nop nmi", 0, 1, 0x00, 0xFF, 5, 0x0066, 0, 0xD);
+  mismatches += check_ack_span("incbc im1", 1, 0, 0x03, 0xFF, 6, 0x0038, 0, 0xD);
+  mismatches += check_ack_span("incbc im2", 2, 0, 0x03, 0x20, 8, 0x1234, 0, 0xD);
+  mismatches += check_ack_span("incbc nmi", 0, 1, 0x03, 0xFF, 6, 0x0066, 0, 0xD);
   // A halted step runs 4 internal T before the trailing acknowledge, so
   // each total is one 4-T period above the acknowledge span: 6/8/5.
-  mismatches += check_ack_span("halt im1", 1, 0, 0x76, 0xFF, 6, 0x0038);
-  mismatches += check_ack_span("halt im2", 2, 0, 0x76, 0x20, 8, 0x1234);
-  mismatches += check_ack_span("halt nmi", 0, 1, 0x76, 0xFF, 5, 0x0066);
+  mismatches += check_ack_span("halt im1", 1, 0, 0x76, 0xFF, 6, 0x0038, 1, 0xD);
+  mismatches += check_ack_span("halt im2", 2, 0, 0x76, 0x20, 8, 0x1234, 1, 0xD);
+  mismatches += check_ack_span("halt nmi", 0, 1, 0x76, 0xFF, 5, 0x0066, 1, 0xD);
   // IM 0 keeps the table: the derived NOP span, the acknowledge table
   // charge, and the off-bus NOP's own table charge.
-  mismatches += check_ack_span("nop im0", 0, 0, 0x00, 0x00, 3, 0x0001);
+  mismatches += check_ack_span("nop im0", 0, 0, 0x00, 0x00, 3, 0x0001, 0, 0xD);
+  mismatches += check_ack_mask_change();
   printf("*** acknowledge charge test: %s\n", mismatches == 0 ? "OK" : "FAILED");
   free(memory);
   return mismatches != 0;
