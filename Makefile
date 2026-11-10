@@ -13,7 +13,7 @@ $(bin): $(obj)
 
 # Bus-cycle timing test: kept out of src (it has its own main and needs
 # the new T counter interface), built on demand only.
-tstate_test: z80_tstate_test.o z80.o z80_timing_generic.o
+tstate_test: z80_tstate_test.o z80.o z80_timing_generic.o z80_timing_cpc.o
 	$(CC) -o $@ $^ $(LDFLAGS)
 
 clean:

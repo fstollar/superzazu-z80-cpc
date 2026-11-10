@@ -51,9 +51,9 @@ typedef enum {
 // conditional costs as the instruction runs. FROM_WAIT_SLOTS charges once
 // per step, at the end of the instruction, as the number of 4-T periods
 // from the step's M1 sample slot to the next one; the per-opcode and
-// conditional table charges are skipped, while interrupt acknowledges keep
-// their table cost. The mode applies to a step only when the WAIT mask
-// leaves exactly one phase free; otherwise the step falls back to the table.
+// conditional table charges are skipped, while NMI/IM1/IM2 acknowledges
+// are charged from their own sampled slots; IM 0 keeps the table. The
+// mode applies to a step only when the WAIT mask leaves exactly one phase
 typedef enum {
   Z80_CYC_FROM_TABLE = 0,
   Z80_CYC_FROM_WAIT_SLOTS = 1
