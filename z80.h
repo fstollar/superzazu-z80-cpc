@@ -96,11 +96,20 @@ struct z80 {
   z80_cyc_source_t cyc_source; // where the cyc charge comes from (above);
                                // Z80_CYC_FROM_TABLE until z80_set_cyc_source
                                // selects the WAIT-sampled slots
+  uint8_t cyc_derived_step; // internal: latched at z80_step entry: whether
+                            // this step derives the cycle count from the
+                            // WAIT-sampled slots. The charge sites read the
+                            // latch, OR im0_active, so a mask or source
+                            // change inside a step cannot split one step's
+                            // charges across the two modes.
 
   unsigned long t_counter; // T-state counter: every bus cycle and every
-                           // internal stretch advances it, so one step's
-                           // bus plus internal T always equals the generic
-                           // table cost the core charges to cyc above.
+                           // internal stretch advances it. Without a WAIT
+                           // mask one step's bus plus internal T equals the
+                           // generic table cost the core charges to cyc
+                           // above; a mask stretches bus cycles, and in
+                           // Z80_CYC_FROM_WAIT_SLOTS cyc comes from the
+                           // WAIT-sampled slots instead.
                            // A derived cyc charge spans M1 sample slot to
                            // M1 sample slot within one step only; absolute
                            // T is never converted.

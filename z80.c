@@ -40,17 +40,20 @@ static unsigned long align_free_slot(unsigned long stamp, unsigned free_phase) {
 }
 
 // Whether this step derives cyc from the WAIT-sampled slots: the source
-// selects it and the mask leaves exactly one phase free. Evaluated live so
-// every charge site agrees with the step's own span.
+// selects it and the mask leaves exactly one phase free. Evaluated once at
+// z80_step entry and latched in cyc_derived_step below; the charge sites
+// read the latch (OR im0_active) so every site agrees with the step's own
+// span even if a callback changes the mask or source mid-step.
 static inline bool cyc_derived_now(const z80* const z) {
   return z->cyc_source == Z80_CYC_FROM_WAIT_SLOTS && wait_free_phase(z->periodic_wait_mask) < 4;
 }
 
 // Whether this site keeps its timing-table charge: always in the table
 // source, and for the instruction injected by an IM 0 acknowledge, which
-// runs off the bus and keeps the table.
+// runs off the bus and keeps the table. Reads the step-entry latch, so a
+// mask or source change inside the step cannot split its charges.
 static inline bool cyc_table_now(const z80* const z) {
-  return !cyc_derived_now(z) || z->im0_active;
+  return !z->cyc_derived_step || z->im0_active;
 }
 
 // Interrupt-acknowledge M1: six T with two automatic waits, sampled at the
@@ -202,9 +205,11 @@ static inline void port_wr(z80* const z, uint16_t port, uint8_t val) {
 }
 
 // Advances the T counter over internal (non-bus) T-states, which run with
-// no host callback. The bus helpers above advance it per bus cycle instead,
-// so one step's bus plus internal T always equals the generic table cost
-// the core charges to cyc. Amounts below are plain T counts for the default
+// no host callback. The bus helpers above advance it per bus cycle instead.
+// Without a WAIT mask one step's bus plus internal T equals the generic
+// table cost the core charges to cyc; with a mask the bus stretches move
+// the counts, and in Z80_CYC_FROM_WAIT_SLOTS cyc comes from the sampled
+// slots instead. Amounts below are plain T counts for the default
 // generic table.
 static inline void internal_t_states(z80* const z, unsigned n) {
   z->t_counter += n;
@@ -955,6 +960,7 @@ void z80_init(z80* const z) {
   z->int_sample_point = 0;
   z->timing = &z80_timing_generic;
   z->cyc_source = Z80_CYC_FROM_TABLE;
+  z->cyc_derived_step = 0;
 
   z->pc = 0;
   z->sp = 0xFFFF;
@@ -1012,7 +1018,11 @@ void z80_step(z80* const z) {
   // When deriving the cycle count from the WAIT-sampled slots, the charge
   // spans from the step's own M1 sample slot to the next step's. On the
   // halted path no fetch runs; the slot is the one the fetch would have used.
+  // The mode is latched here for the whole step (cyc_derived_step): the
+  // charge sites below read the latch, so they agree with this span even
+  // if a callback changes the mask or source mid-step.
   const bool derived_now = cyc_derived_now(z);
+  z->cyc_derived_step = derived_now;
   const unsigned free_phase = derived_now ? wait_free_phase(z->periodic_wait_mask) : 0;
   const unsigned long start_slot = derived_now ? align_free_slot(z->t_counter + 1, free_phase) : 0;
   if (z->halted) {
