@@ -74,9 +74,17 @@ static inline void ww(z80* const z, uint16_t addr, uint16_t val) {
   wb(z, addr + 1, val >> 8);
 }
 
+// Stack pushes and exchange writes put the high byte on the bus first:
+// the write to addr + 1 runs a full 3 T cycle ahead of the write to
+// addr. Plain 16-bit stores keep ww()'s low-byte-first order above.
+static inline void ww_hi_first(z80* const z, uint16_t addr, uint16_t val) {
+  wb(z, addr + 1, val >> 8);
+  wb(z, addr, val & 0xFF);
+}
+
 static inline void pushw(z80* const z, uint16_t val) {
   z->sp -= 2;
-  ww(z, z->sp, val);
+  ww_hi_first(z, z->sp, val);
 }
 
 static inline uint16_t popw(z80* const z) {
@@ -1184,7 +1192,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     // around to the two writes, which close with two trailing internal T.
     const uint16_t val = rw(z, z->sp);
     internal_t_states(z, 1);
-    ww(z, z->sp, get_hl(z));
+    ww_hi_first(z, z->sp, get_hl(z));
     internal_t_states(z, 2);
     set_hl(z, val);
     z->mem_ptr = val;
@@ -1686,7 +1694,7 @@ void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
     // one internal T turns the bus around, two trail the writes.
     const uint16_t val = rw(z, z->sp);
     internal_t_states(z, 1);
-    ww(z, z->sp, *iz);
+    ww_hi_first(z, z->sp, *iz);
     internal_t_states(z, 2);
     *iz = val;
     z->mem_ptr = val;

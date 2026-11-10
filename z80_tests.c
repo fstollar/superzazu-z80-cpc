@@ -913,6 +913,116 @@ static int run_qlatch_test(void) {
   return r != 0;
 }
 
+// MARK: stack write order
+// A push puts the high byte on the bus first: the write to the higher
+// address runs a full cycle ahead of the write to the lower one. CALL,
+// RST and the interrupt acknowledge push the return address the same way,
+// as do the two writes of ex (sp),hl/iz. Plain ld (**),rr stores keep
+// their low-byte-first order and are not covered here.
+static uint16_t write_log[8];
+static int write_count = 0;
+
+static void record_write(void* userdata, uint16_t addr, uint8_t val) {
+  (void)userdata;
+  memory[addr] = val;
+  if (write_count < 8) {
+    write_log[write_count++] = addr;
+  }
+}
+
+static void init_push_cpu(z80* const z) {
+  z80_init(z);
+  z->read_byte = rb;
+  z->write_byte = record_write;
+  z->port_in = in;
+  z->port_out = out;
+  memset(memory, 0, MEMORY_SIZE); // NOPs everywhere
+  z->pc = 0;
+  z->sp = 0x1000;
+  write_count = 0;
+}
+
+static int check_push_order(const char* name, uint16_t hi, uint16_t lo) {
+  if (write_count != 2 || write_log[0] != hi || write_log[1] != lo) {
+    printf("*** ERROR %s: writes", name);
+    for (int i = 0; i < write_count; ++i) {
+      printf(" %04X", write_log[i]);
+    }
+    printf(" (expected %04X %04X)\n", hi, lo);
+    return 1;
+  }
+  return 0;
+}
+
+static int check_pushed(const char* name, const z80* const z,
+    uint16_t expected) {
+  if (pushed_return(z) != expected) {
+    printf("*** ERROR %s: pushed %04X (expected %04X)\n", name,
+        pushed_return(z), expected);
+    return 1;
+  }
+  return 0;
+}
+
+static int run_push_order_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  z80 z;
+
+  // PUSH BC stores B at SP - 1 ahead of C at SP - 2.
+  init_push_cpu(&z);
+  memory[0x0000] = 0xC5; // push bc
+  z.b = 0x12;
+  z.c = 0x34;
+  z80_step(&z);
+  r += check_push_order("push bc", 0x0FFF, 0x0FFE);
+  r += check_pushed("push bc", &z, 0x1234);
+
+  // CALL pushes the return address high byte first, then jumps.
+  init_push_cpu(&z);
+  memory[0x0000] = 0xCD; // call 1234
+  memory[0x0001] = 0x34;
+  memory[0x0002] = 0x12;
+  z80_step(&z);
+  r += check_push_order("call", 0x0FFF, 0x0FFE);
+  r += check_pushed("call", &z, 0x0003);
+  if (z.pc != 0x1234) {
+    printf("*** ERROR call: pc %04X (expected 1234)\n", z.pc);
+    r += 1;
+  }
+
+  // RST pushes the return address the same way.
+  init_push_cpu(&z);
+  memory[0x0000] = 0xFF; // rst 38h
+  z80_step(&z);
+  r += check_push_order("rst", 0x0FFF, 0x0FFE);
+  r += check_pushed("rst", &z, 0x0001);
+  if (z.pc != 0x0038) {
+    printf("*** ERROR rst: pc %04X (expected 0038)\n", z.pc);
+    r += 1;
+  }
+
+  // The IM 1 acknowledge pushes the interrupted pc high byte first.
+  init_push_cpu(&z);
+  z.interrupt_mode = 1;
+  z.iff1 = 1;
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  r += check_push_order("im1 ack", 0x0FFF, 0x0FFE);
+  r += check_pushed("im1 ack", &z, 0x0001);
+  if (z.pc != 0x0038) {
+    printf("*** ERROR im1 ack: pc %04X (expected 0038)\n", z.pc);
+    r += 1;
+  }
+
+  printf("*** push order test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: test runner
 static int run_test(
     z80* const z, const char* filename, unsigned long cyc_expected) {
@@ -977,6 +1087,9 @@ int main(int argc, char** argv) {
   }
   if (argc > 1 && strcmp(argv[1], "qlatch") == 0) {
     return run_qlatch_test();
+  }
+  if (argc > 1 && strcmp(argv[1], "pushorder") == 0) {
+    return run_push_order_test();
   }
 
   memory = malloc(MEMORY_SIZE);
