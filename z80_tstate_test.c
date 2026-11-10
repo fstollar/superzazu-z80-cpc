@@ -192,9 +192,12 @@ static void check_pc(const char *label, z80 *z, uint16_t want) {
    number of bus entries (so a wrong bus/internal split fails there too).
    With the new fields present, every recorded start T must equal the
    cumulative row position as well.
-   Row sources: Sean Young's Undocumented Z80 Documented M-cycle/T-state
-   tables for the branch, stack, indexed and DDCB shapes; the per-T bus
-   traces in the SingleStepTests subset for the ED block and I/O shapes.
+   Row sources: the Zilog-derived instruction list
+   (Z80-Instruction-List-with-T-states.pdf) for the M-cycle lengths of the
+   branch, stack, indexed and DDCB shapes, and the FUSE per-T test trace
+   (tests.expected) for the order inside a mixed 5 T cycle (the bus access
+   first, then the internal T); the per-T bus traces in the SingleStepTests
+   subset for the ED block and I/O shapes.
    Two rows need a note. OUTI/OTIR read (HL) before touching the port, so
    in time order they are 4,5,3,4 (read at 9, OUT at 12); the Zilog
    instruction list prints 4,5,4,3, which transposes the 3 T read and the
