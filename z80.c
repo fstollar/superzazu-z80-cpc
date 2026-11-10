@@ -16,6 +16,14 @@
 // The clear sample slot is recorded for dynamic holds to resume from.
 static inline void apply_sampled_waits(z80* const z, unsigned long sample_t) {
   const unsigned long mask = z->periodic_wait_mask;
+  if ((mask & 0xFu) == 0xFu) {
+    // A mask that never releases WAIT would stop a real processor forever;
+    // the core does not model a stuck WAIT line and ignores such a mask
+    // instead of stretching without end. Matches the derived-charge rule
+    // below, which falls back to the table when no phase is free.
+    z->wait_sample_t = sample_t;
+    return;
+  }
   while ((mask >> (sample_t & 3u)) & 1u) {
     z->t_counter++;
     sample_t++;

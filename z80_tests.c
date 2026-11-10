@@ -1,6 +1,14 @@
+// fork()/alarm()/waitpid() for the no-free-phase WAIT test below: the POSIX
+// declarations stay hidden under strict C99 without the feature macro, so it
+// comes before every system include.
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include "z80.h"
 
 // MARK: simple memory interface
@@ -1065,6 +1073,50 @@ static int check_cyc_source(const char* name, uint8_t opcode, z80_cyc_source_t s
   return 0;
 }
 
+// A mask with every slot set would hold WAIT asserted forever: the stretch
+// loop looks for the next clear slot and never finds one. No board produces
+// such a mask, but a test or caller bug could, and hanging the process is
+// the wrong answer. The core ignores a mask with no clear phase instead.
+// The step runs in a forked child under alarm(): before the fix the child
+// hangs and the alarm kills it, after it the child steps one unstretched
+// NOP and exits clean.
+static int check_wait_mask_no_free_phase(void) {
+  const char* name = "mask 0xF";
+  memset(memory, 0, MEMORY_SIZE);
+  memory[0x0000] = 0x00; // nop
+  const pid_t pid = fork();
+  if (pid < 0) {
+    printf("*** ERROR %s: fork failed\n", name);
+    return 1;
+  }
+  if (pid == 0) {
+    alarm(5);
+    z80 z;
+    z80_init(&z);
+    z.read_byte = rb;
+    z.write_byte = wb;
+    z.port_in = in;
+    z.port_out = out;
+    z.pc = 0;
+    z.periodic_wait_mask = 0xF;
+    z80_step(&z);
+    // One unstretched M1 fetch: 4 T, the table charge, pc advanced by one.
+    _exit(z.t_counter == 4 && z.cyc == 4 && z.pc == 1 ? 0 : 2);
+  }
+  int status = 0;
+  if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+      WEXITSTATUS(status) != 0) {
+    if (WIFEXITED(status))
+      printf("*** ERROR %s: child exited %d (expected a 4T/4cyc step)\n",
+          name, WEXITSTATUS(status));
+    else
+      printf("*** ERROR %s: child did not finish (WAIT stretched forever)\n",
+          name);
+    return 1;
+  }
+  return 0;
+}
+
 static int run_cyc_source_test(void) {
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
@@ -1103,6 +1155,7 @@ static int run_cyc_source_test(void) {
       r += 1;
     }
   }
+  r += check_wait_mask_no_free_phase();
   printf("*** cyc source test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);
   return r != 0;
