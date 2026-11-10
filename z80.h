@@ -46,6 +46,19 @@ typedef enum {
   Z80_READ_DEBUG = 4
 } z80_read_kind_t;
 
+// How the core charges the cycle count for an instruction. FROM_TABLE (the
+// default, set by z80_init) adds the timing table's per-opcode and
+// conditional costs as the instruction runs. FROM_WAIT_SLOTS charges once
+// per step, at the end of the instruction, as the number of 4-T periods
+// from the step's M1 sample slot to the next one; the per-opcode and
+// conditional table charges are skipped, while interrupt acknowledges keep
+// their table cost. The mode applies to a step only when the WAIT mask
+// leaves exactly one phase free; otherwise the step falls back to the table.
+typedef enum {
+  Z80_CYC_FROM_TABLE = 0,
+  Z80_CYC_FROM_WAIT_SLOTS = 1
+} z80_cyc_source_t;
+
 // Kind of bus cycle requested from im0_bus (see struct z80).
 typedef enum {
   Z80_IM0_INTA = 0, // follow-on opcode byte after a prefix (M1 + IORQ cycle)
@@ -76,13 +89,21 @@ struct z80 {
   uint8_t (*im0_bus)(z80*, uint16_t pc, z80_im0_cycle_t cycle);
   void* userdata;
 
-  unsigned long cyc; // cycle count (t-states)
+  unsigned long cyc; // cycle count: the timing table's per-opcode costs,
+                     // or, in Z80_CYC_FROM_WAIT_SLOTS, one charge per step
+                     // from the WAIT-sampled M1 slots (see z80_cyc_source_t)
   const z80_timing_t* timing; // NULL until z80_init() sets z80_timing_generic
+  z80_cyc_source_t cyc_source; // where the cyc charge comes from (above);
+                               // Z80_CYC_FROM_TABLE until z80_set_cyc_source
+                               // selects the WAIT-sampled slots
 
   unsigned long t_counter; // T-state counter: every bus cycle and every
                            // internal stretch advances it, so one step's
                            // bus plus internal T always equals the generic
                            // table cost the core charges to cyc above.
+                           // A derived cyc charge spans M1 sample slot to
+                           // M1 sample slot within one step only; absolute
+                           // T is never converted.
   unsigned long bus_cycle_start; // absolute T of the bus cycle now running;
                                   // valid inside each bus callback (read,
                                   // write, port, im0 follow-on).
@@ -134,6 +155,7 @@ void z80_debug_output(z80* const z);
 void z80_gen_nmi(z80* const z);
 void z80_gen_int(z80* const z, uint8_t data);
 void z80_set_timing(z80* const z, const z80_timing_t* timing);
+void z80_set_cyc_source(z80* const z, z80_cyc_source_t source);
 
 // Adds n T-states to the running bus cycle from inside one of its
 // callbacks, for a device that holds WAIT itself. Only the T counter

@@ -23,6 +23,36 @@ static inline void apply_sampled_waits(z80* const z, unsigned long sample_t) {
   z->wait_sample_t = sample_t;
 }
 
+// The WAIT mask's single free phase (0-3), or 4 when the mask leaves zero
+// or several phases free. Only a waveform with exactly one free phase can
+// pace derivation; anything else (including mask 0, which stretches
+// nothing) falls back to the table.
+static unsigned wait_free_phase(unsigned long mask) {
+  static const uint8_t free_phase[16] = {
+    4, 4, 4, 4, 4, 4, 4, 3, 4, 4, 4, 2, 4, 1, 0, 4
+  };
+  return free_phase[mask & 0xFu];
+}
+
+// Rounds a T count up to the next free slot of a one-free-phase waveform.
+static unsigned long align_free_slot(unsigned long stamp, unsigned free_phase) {
+  return stamp + ((free_phase - stamp) & 3u);
+}
+
+// Whether this step derives cyc from the WAIT-sampled slots: the source
+// selects it and the mask leaves exactly one phase free. Evaluated live so
+// every charge site agrees with the step's own span.
+static inline bool cyc_derived_now(const z80* const z) {
+  return z->cyc_source == Z80_CYC_FROM_WAIT_SLOTS && wait_free_phase(z->periodic_wait_mask) < 4;
+}
+
+// Whether this site keeps its timing-table charge: always in the table
+// source, and for the instruction injected by an IM 0 acknowledge, which
+// runs off the bus and keeps the table.
+static inline bool cyc_table_now(const z80* const z) {
+  return !cyc_derived_now(z) || z->im0_active;
+}
+
 // Interrupt-acknowledge M1: six T with two automatic waits, sampled at the
 // last automatic Tw. It sets the cycle start like any bus cycle but runs
 // no host callback: the acknowledged byte comes from the interrupt setup,
@@ -302,7 +332,7 @@ static inline void cond_call(z80* const z, bool condition) {
   const uint16_t addr = nextw(z);
   if (condition) {
     call(z, addr);
-    z->cyc += z->timing->cond_call_taken_extra;
+    if (cyc_table_now(z)) z->cyc += z->timing->cond_call_taken_extra;
   }
   z->mem_ptr = addr;
 }
@@ -320,7 +350,7 @@ static inline void cond_ret(z80* const z, bool condition) {
   internal_t_states(z, 1);
   if (condition) {
     ret(z);
-    z->cyc += z->timing->cond_ret_taken_extra;
+    if (cyc_table_now(z)) z->cyc += z->timing->cond_ret_taken_extra;
   }
 }
 
@@ -333,7 +363,7 @@ static inline void cond_jr(z80* const z, bool condition) {
   const int8_t b = nextb(z);
   if (condition) {
     jr(z, b);
-    z->cyc += z->timing->cond_jr_taken_extra;
+    if (cyc_table_now(z)) z->cyc += z->timing->cond_jr_taken_extra;
     internal_t_states(z, z80_timing_generic.cond_jr_taken_extra);
   }
 }
@@ -924,6 +954,7 @@ void z80_init(z80* const z) {
   z->wait_sample_t = 0;
   z->int_sample_point = 0;
   z->timing = &z80_timing_generic;
+  z->cyc_source = Z80_CYC_FROM_TABLE;
 
   z->pc = 0;
   z->sp = 0xFFFF;
@@ -978,6 +1009,12 @@ void z80_init(z80* const z) {
 void z80_step(z80* const z) {
   z->iff_delay = 0;
   z->flags_written = 0;
+  // When deriving the cycle count from the WAIT-sampled slots, the charge
+  // spans from the step's own M1 sample slot to the next step's. On the
+  // halted path no fetch runs; the slot is the one the fetch would have used.
+  const bool derived_now = cyc_derived_now(z);
+  const unsigned free_phase = derived_now ? wait_free_phase(z->periodic_wait_mask) : 0;
+  const unsigned long start_slot = derived_now ? align_free_slot(z->t_counter + 1, free_phase) : 0;
   if (z->halted) {
     // A halted CPU keeps fetching NOPs with no bus-visible advance here
     // (no fetch is issued on this path); the 4 T run internal.
@@ -987,6 +1024,12 @@ void z80_step(z80* const z) {
     const uint8_t opcode = fetchb(z); // M1 opcode fetch
     exec_opcode(z, opcode);
   }
+
+  // The derived instruction charge lands before the INT sample point and
+  // any acknowledge, so acknowledges see before + instruction as with the
+  // table, and keep their own table cost.
+  if (derived_now)
+    z->cyc += (align_free_slot(z->t_counter + 1, free_phase) - start_slot) / 4;
 
   // The T at which the core samples INT: the last T of the stepped
   // instruction, before any acknowledge. The host ticks the board up to
@@ -1046,7 +1089,7 @@ void z80_gen_int(z80* const z, uint8_t data) {
 
 // executes a non-prefixed opcode
 void exec_opcode(z80* const z, uint8_t opcode) {
-  z->cyc += z->timing->cyc_00[opcode];
+  if (cyc_table_now(z)) z->cyc += z->timing->cyc_00[opcode];
   inc_r(z);
 
   switch (opcode) {
@@ -1539,7 +1582,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
 
 // executes a DD/FD opcode (IZ = IX or IY)
 void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
-  z->cyc += z->timing->cyc_ddfd[opcode];
+  if (cyc_table_now(z)) z->cyc += z->timing->cyc_ddfd[opcode];
   inc_r(z);
 
 #define IZD displace(z, *iz, nextb(z))
@@ -1724,7 +1767,7 @@ void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
 
 // executes a CB opcode
 void exec_opcode_cb(z80* const z, uint8_t opcode) {
-  z->cyc += z->timing->cyc_cb[opcode];
+  if (cyc_table_now(z)) z->cyc += z->timing->cyc_cb[opcode];
   inc_r(z);
 
   // decoding instructions from http://z80.info/decoding.htm#cb
@@ -1841,16 +1884,16 @@ void exec_opcode_dcb(z80* const z, uint8_t opcode, uint16_t addr) {
 
   if (x_ == 1) {
     // bit instructions take 20 cycles, others take 23
-    z->cyc += z->timing->ddfdcb_bit;
+    if (cyc_table_now(z)) z->cyc += z->timing->ddfdcb_bit;
   } else {
     wb(z, addr, result);
-    z->cyc += z->timing->ddfdcb_other;
+    if (cyc_table_now(z)) z->cyc += z->timing->ddfdcb_other;
   }
 }
 
 // executes a ED opcode
 void exec_opcode_ed(z80* const z, uint8_t opcode) {
-  z->cyc += z->timing->cyc_ed[opcode];
+  if (cyc_table_now(z)) z->cyc += z->timing->cyc_ed[opcode];
   inc_r(z);
   switch (opcode) {
   // ld i/r,a and ld a,i/r run one T past their two fetches.
@@ -1904,7 +1947,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
 
     if (get_bc(z) != 0) {
       z->pc -= 2;
-      z->cyc += z->timing->block_repeat_extra;
+      if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
@@ -1916,7 +1959,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
 
     if (get_bc(z) != 0) {
       z->pc -= 2;
-      z->cyc += z->timing->block_repeat_extra;
+      if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
@@ -1928,7 +1971,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     cpi(z);
     if (get_bc(z) != 0 && !z->zf) {
       z->pc -= 2;
-      z->cyc += z->timing->cpir_cpdr_repeat_extra;
+      if (cyc_table_now(z)) z->cyc += z->timing->cpir_cpdr_repeat_extra;
       internal_t_states(z, z80_timing_generic.cpir_cpdr_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
@@ -1937,7 +1980,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     cpd(z);
     if (get_bc(z) != 0 && !z->zf) {
       z->pc -= 2;
-      z->cyc += z->timing->cpir_cpdr_repeat_extra;
+      if (cyc_table_now(z)) z->cyc += z->timing->cpir_cpdr_repeat_extra;
       internal_t_states(z, z80_timing_generic.cpir_cpdr_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
@@ -1962,7 +2005,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     ini(z);
     if (z->b > 0) {
       z->pc -= 2;
-      z->cyc += z->timing->block_repeat_extra;
+      if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
@@ -1972,7 +2015,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     ind(z);
     if (z->b > 0) {
       z->pc -= 2;
-      z->cyc += z->timing->block_repeat_extra;
+      if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
@@ -2016,7 +2059,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     outi(z);
     if (z->b > 0) {
       z->pc -= 2;
-      z->cyc += z->timing->block_repeat_extra;
+      if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
@@ -2026,7 +2069,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     outd(z);
     if (z->b > 0) {
       z->pc -= 2;
-      z->cyc += z->timing->block_repeat_extra;
+      if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
@@ -2153,4 +2196,8 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
 
 void z80_set_timing(z80* const z, const z80_timing_t* timing) {
   z->timing = timing;
+}
+
+void z80_set_cyc_source(z80* const z, z80_cyc_source_t source) {
+  z->cyc_source = source;
 }

@@ -1039,6 +1039,75 @@ static int run_push_order_test(void) {
   return r != 0;
 }
 
+// MARK: derived cycle-count source
+// With the source off (the default) the table charges are unchanged; with
+// it on and a WAIT mask with exactly one free phase, one step charges the
+// number of 4-T periods from its M1 sample slot to the next one; any other
+// mask falls back to the table.
+static int check_cyc_source(const char* name, uint8_t opcode, z80_cyc_source_t source,
+    uint8_t mask, unsigned long expected_cyc) {
+  z80 z;
+  z80_init(&z);
+  z.read_byte = rb;
+  z.write_byte = wb;
+  z.port_in = in;
+  z.port_out = out;
+  memset(memory, 0, MEMORY_SIZE);
+  memory[0x0000] = opcode;
+  z.pc = 0;
+  z80_set_cyc_source(&z, source);
+  z.periodic_wait_mask = mask;
+  z80_step(&z);
+  if (z.cyc != expected_cyc) {
+    printf("*** ERROR %s: cyc %lu (expected %lu)\n", name, z.cyc, expected_cyc);
+    return 1;
+  }
+  return 0;
+}
+
+static int run_cyc_source_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  // Source off: the table charge, whatever the mask.
+  r += check_cyc_source("table nop", 0x00, Z80_CYC_FROM_TABLE, 0xD, 4);
+  // Source on without a one-free-phase mask: still the table (mask 0
+  // stretches nothing; mask 0x5 leaves two phases free).
+  r += check_cyc_source("slots nop mask 0", 0x00, Z80_CYC_FROM_WAIT_SLOTS, 0x0, 4);
+  r += check_cyc_source("slots nop mask 5", 0x00, Z80_CYC_FROM_WAIT_SLOTS, 0x5, 4);
+  // Source on with one free phase: the M1-slot span (NOP one 4-T period,
+  // INC BC two).
+  r += check_cyc_source("slots nop", 0x00, Z80_CYC_FROM_WAIT_SLOTS, 0xD, 1);
+  r += check_cyc_source("slots nop rotated", 0x00, Z80_CYC_FROM_WAIT_SLOTS, 0x7, 1);
+  r += check_cyc_source("slots incbc", 0x03, Z80_CYC_FROM_WAIT_SLOTS, 0xD, 2);
+  // Two chained steps share the running counter.
+  {
+    z80 z;
+    z80_init(&z);
+    z.read_byte = rb;
+    z.write_byte = wb;
+    z.port_in = in;
+    z.port_out = out;
+    memset(memory, 0, MEMORY_SIZE);
+    memory[0x0000] = 0x00;
+    memory[0x0001] = 0x00;
+    z.pc = 0;
+    z80_set_cyc_source(&z, Z80_CYC_FROM_WAIT_SLOTS);
+    z.periodic_wait_mask = 0xD;
+    z80_step(&z);
+    z80_step(&z);
+    if (z.cyc != 2) {
+      printf("*** ERROR slots nop chained: cyc %lu (expected 2)\n", z.cyc);
+      r += 1;
+    }
+  }
+  printf("*** cyc source test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: test runner
 static int run_test(
     z80* const z, const char* filename, unsigned long cyc_expected) {
@@ -1107,6 +1176,9 @@ int main(int argc, char** argv) {
   if (argc > 1 && strcmp(argv[1], "pushorder") == 0) {
     return run_push_order_test();
   }
+  if (argc > 1 && strcmp(argv[1], "cycsource") == 0) {
+    return run_cyc_source_test();
+  }
 
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
@@ -1138,6 +1210,7 @@ int main(int argc, char** argv) {
     r += run_ei_delay_test();
     r += run_reti_iff_test();
     r += run_qlatch_test();
+    r += run_cyc_source_test();
   }
   return r != 0;
 }
