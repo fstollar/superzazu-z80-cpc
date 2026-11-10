@@ -610,6 +610,28 @@ static void ddcb_cases(void) {
   check_trace("ddcb rlc", &z, other_rows, 6);
 }
 
+/* LD r,(IX+d) and ALU (IX+d) read the data byte after the 5 internal
+   displacement-add T, so the read sits at 16, not 11. */
+static void ix_d_read_cases(void) {
+  static const int rows[] = {4, 4, 3, -5, 3};
+  z80 z;
+  set_base(&z);
+  uint8_t code_ld[3] = {0xDD, 0x46, 0x05};
+  load_bytes(code_ld, 3);
+  begin_step(&z);
+  z80_step(&z);
+  end_step("ld b,(ix+5)", &z);
+  check_pc("ld b,(ix+5)", &z, 0x1003);
+  check_trace("ld b,(ix+5)", &z, rows, 5);
+  set_base(&z);
+  uint8_t code_add[3] = {0xDD, 0x86, 0x05};
+  load_bytes(code_add, 3);
+  begin_step(&z);
+  z80_step(&z);
+  end_step("add a,(ix+5)", &z);
+  check_pc("add a,(ix+5)", &z, 0x1003);
+  check_trace("add a,(ix+5)", &z, rows, 5);
+}
 /* LD (IX+d),n reads its n byte at 11, like the DDCB op byte. */
 static void ix_d_n_case(void) {
   z80 z;
@@ -624,6 +646,51 @@ static void ix_d_n_case(void) {
   check_trace("ld (ix+5),n", &z, rows, 5);
   if (ram[0x4005] != 0x42) {
     printf("FAIL ld (ix+5),n: (IX+5) is %02X, want 42\n", ram[0x4005]);
+    ++failures;
+  }
+}
+
+/* IM 0 with a prefix byte: the diverted fetch, the first INTA, the
+   follow-on INTA carrying the prefixed opcode, then the off-bus body. */
+static uint8_t im0_follow;
+static uint8_t im0_bus_override(z80 *z, uint16_t pc, z80_im0_cycle_t cycle) {
+  (void)z;
+  (void)pc;
+  (void)cycle;
+  return im0_follow;
+}
+
+static void im0_prefix_cases(void) {
+  static const int rows[] = {4, -6, -6};
+  z80 z;
+  set_base(&z);
+  z.im0_bus = im0_bus_override;
+  z.interrupt_mode = 0;
+  z.iff1 = 1;
+  im0_follow = 0x00;
+  uint8_t code_cb[1] = {0x00};
+  load_bytes(code_cb, 1);
+  z80_gen_int(&z, 0xCB);
+  begin_step(&z);
+  z80_step(&z);
+  end_step("im0 cb 00", &z);
+  check_pc("im0 cb 00", &z, 0x1001);
+  check_trace("im0 cb 00", &z, rows, 3);
+  set_base(&z);
+  z.im0_bus = im0_bus_override;
+  z.interrupt_mode = 0;
+  z.iff1 = 1;
+  im0_follow = 0x44;
+  uint8_t code_ed[1] = {0x00};
+  load_bytes(code_ed, 1);
+  z80_gen_int(&z, 0xED);
+  begin_step(&z);
+  z80_step(&z);
+  end_step("im0 ed 44", &z);
+  check_pc("im0 ed 44", &z, 0x1001);
+  check_trace("im0 ed 44", &z, rows, 3);
+  if (z.iff1) {
+    printf("FAIL im0 prefix: iff1 still set after acknowledge\n");
     ++failures;
   }
 }
@@ -670,11 +737,11 @@ static void ack_case(const char *label, enum ack_kind kind, uint16_t want_pc,
 static void ack_cases(void) {
   /* Totals match Young §5: NMI 4+11, IM0 4+2+4, IM1 4+13, IM2 4+19. */
   static const int nmi_rows[] = {4, -5, 3, 3};
-  static const int im0_rows[] = {4, -2, -4};
+  static const int im0_rows[] = {4, -6};
   static const int im1_rows[] = {4, -7, 3, 3};
   static const int im2_rows[] = {4, -7, 3, 3, 3, 3};
   ack_case("nmi", ACK_NMI, 0x0066, nmi_rows, 4);
-  ack_case("im0", ACK_IM0, 0x1001, im0_rows, 3);
+  ack_case("im0", ACK_IM0, 0x1001, im0_rows, 2);
   ack_case("im1", ACK_IM1, 0x0038, im1_rows, 4);
   ack_case("im2", ACK_IM2, 0x5678, im2_rows, 6);
 }
@@ -691,6 +758,8 @@ int main(void) {
   in_out_c_cases();
   ddcb_cases();
   ix_d_n_case();
+  ix_d_read_cases();
+  im0_prefix_cases();
   ack_cases();
   if (failures == 0)
     printf("tstate: all cases pass\n");

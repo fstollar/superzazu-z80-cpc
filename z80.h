@@ -6,14 +6,14 @@
 #include <stdbool.h>
 #include "z80_timing.h"
 
-// Half-T strobe edges (Q2): the Z80 drives and samples its bus strobes on
+// Half-T strobe edges: the Z80 drives and samples its bus strobes on
 // its own clock edges, so every edge below lands on a half-T boundary
 // (125 ns at 4 MHz, two half-T per T). Offsets are half-T counts from the
 // bus cycle's start T, before any WAIT stretching. The sample T per cycle
 // kind is the ACCC's (1.9 §4.4.4 p.26: opcode fetch and memory sample in
 // T2, port in T3); the CLK H/L halves of diagrams A-C (p.28-29) put the
 // /WAIT sample at the falling edge and the read-data latch at the rising
-// edge that ends the sample T. The board (13.21, 16 MHz: two master ticks
+// edge that ends the sample T. The board clock (16 MHz, two master ticks
 // per half-T) adds an offset to a cycle's start T to reach the edge's
 // tick. Output-strobe windows (/MREQ, /IORQ, /RD, /WR fall and rise) are
 // analogue delays, not clock edges, so they stay out of this half-T grid;
@@ -92,9 +92,10 @@ struct z80 {
                               // at its sample T out to the next clear slot;
                               // mask 0 (the default) stretches nothing. The
                               // board owns the pattern.
-  unsigned long int_sample_point; // end T of the stepped instruction: the T
-                                  // at which the core samples INT, recorded
-                                  // by z80_step. A host ticks the board up
+  unsigned long int_sample_point; // last T of the stepped instruction:
+                                  // the T at which the core samples INT,
+                                  // recorded by z80_step before any
+                                  // acknowledge. A host ticks the board up
                                   // to this T before checking interrupts.
 
   uint16_t pc, sp, ix, iy; // special purpose registers
