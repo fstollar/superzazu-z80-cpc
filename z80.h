@@ -70,12 +70,11 @@ struct z80 {
   void (*write_byte)(void*, uint16_t, uint8_t);
   uint8_t (*port_in)(z80*, uint16_t);
   void (*port_out)(z80*, uint16_t, uint8_t);
-  // Called from inside process_interrupts() the instant a maskable interrupt
-  // (not NMI) is actually accepted -- i.e. when the real Z80's /IORQ+/M1
-  // interrupt-acknowledge cycle would fire. NULL (the default) skips the
-  // call entirely; a CPC host wires this to let the Gate Array react to
-  // acceptance itself (its automatic bit-5 counter clear), separate from
-  // whatever device generated the interrupt via z80_gen_int().
+  // The interrupt-acknowledge cycle's bus callback, for a maskable
+  // interrupt (not NMI): called once the cycle has opened, so
+  // bus_cycle_start is its first T and wait_sample_t its clear WAIT
+  // sample slot, and before the core uses int_data, so a host can supply
+  // the acknowledged byte here. NULL (the default) skips the call.
   void (*int_ack)(z80*);
   // During an IM 0 instruction, supplies every byte after the first (which
   // comes from z80_gen_int). Z80_IM0_INTA is a follow-on opcode byte after a
@@ -156,6 +155,11 @@ struct z80 {
   bool halted : 1;
   bool int_pending : 1, nmi_pending : 1;
   uint8_t im0_active; // internal: set while an IM 0 instruction runs off the bus
+  // When set, z80_step() returns right after recording int_sample_point,
+  // without its trailing interrupt check: the host brings its INT and NMI
+  // inputs up to that T and then calls z80_check_interrupt() itself.
+  // Clear (the default): z80_step() checks at once, as before.
+  bool int_check_by_host;
 };
 
 void z80_init(z80* const z);
@@ -172,13 +176,14 @@ void z80_set_cyc_source(z80* const z, z80_cyc_source_t source);
 void z80_add_wait_states(z80* const z, unsigned n);
 
 // Services any pending NMI/interrupt immediately, without executing another
-// instruction first. z80_step() already calls this internally as its
-// trailing step, so callers only need this if they generate an interrupt
+// instruction first. The host calls this after z80_step() when
+// int_check_by_host is set, once its INT and NMI inputs reflect the level at
+// int_sample_point; otherwise z80_step() already checks at its end, so other
+// callers need this only if they generate an interrupt
 // (z80_gen_int()/z80_gen_nmi()) *between* z80_step() calls and want it
-// serviced right away instead of waiting for the next z80_step() to reach
-// its own trailing call. Right after EI nothing is accepted, the same as in
-// z80_step()'s own check: the request stays pending until the instruction
-// after EI has run.
+// serviced right away instead of waiting for the next step's check. Right
+// after EI nothing is accepted, the same as in z80_step()'s own check: the
+// request stays pending until the instruction after EI has run.
 void z80_check_interrupt(z80* const z);
 
 #endif // Z80_Z80_H_

@@ -1161,6 +1161,185 @@ static int run_cyc_source_test(void) {
   return r != 0;
 }
 
+// MARK: host-driven interrupt check
+// With int_check_by_host set, z80_step() stops after recording
+// int_sample_point and leaves a pending interrupt alone; the host brings its
+// inputs up to that T and runs the check itself with z80_check_interrupt().
+// The acknowledge hook runs inside the INTA cycle, so it sees that cycle's
+// start T and clear WAIT sample slot.
+static unsigned long ack_bus_start;
+static unsigned long ack_sample_t;
+static unsigned long ack_t_counter;
+static int ack_calls;
+
+static void record_ack(z80* const z) {
+  ack_calls += 1;
+  ack_bus_start = z->bus_cycle_start;
+  ack_sample_t = z->wait_sample_t;
+  ack_t_counter = z->t_counter;
+}
+
+static void init_ack_cpu(z80* const z) {
+  z80_init(z);
+  z->read_byte = rb;
+  z->write_byte = wb;
+  z->port_in = in;
+  z->port_out = out;
+  memset(memory, 0, MEMORY_SIZE); // NOPs everywhere
+  z->pc = 0;
+  z->sp = 0xF000;
+  z->interrupt_mode = 1;
+  z->iff1 = 1;
+  z->iff2 = 1;
+  z->int_ack = record_ack;
+  ack_calls = 0;
+}
+
+// Flag clear: the step accepts as before, and the hook runs inside the INTA
+// cycle: bus_cycle_start is its first T (past the NOP fetch), wait_sample_t
+// its clear WAIT sample slot, and the T counter sits six T past the start.
+static int check_hostcheck_clear(void) {
+  const char* name = "flag clear";
+  z80 z;
+  init_ack_cpu(&z);
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  if (z.pc != 0x0038 || z.int_pending || ack_calls != 1) {
+    printf("*** ERROR %s: pc %04X int_pending %d calls %d"
+        " (expected 0038 0 1)\n", name, z.pc, z.int_pending, ack_calls);
+    return 1;
+  }
+  if (ack_bus_start != 4 || ack_sample_t != ack_bus_start + 3 ||
+      ack_t_counter != ack_bus_start + 6) {
+    printf("*** ERROR %s: bus_start %lu sample %lu t %lu"
+        " (expected 4 +3 +6)\n", name, ack_bus_start, ack_sample_t,
+        ack_t_counter);
+    return 1;
+  }
+  return 0;
+}
+
+// Flag set: the step leaves the pending interrupt and pc alone; the host's
+// own check then reaches exactly the flag-clear end state.
+static int check_hostcheck_set(void) {
+  const char* name = "flag set";
+  z80 clear;
+  init_ack_cpu(&clear);
+  z80_gen_int(&clear, 0xFF);
+  z80_step(&clear);
+  const unsigned long clear_bus = ack_bus_start;
+  const unsigned long clear_sample = ack_sample_t;
+  const unsigned long clear_t = ack_t_counter;
+  z80 host;
+  init_ack_cpu(&host);
+  host.int_check_by_host = true;
+  z80_gen_int(&host, 0xFF);
+  z80_step(&host);
+  if (host.pc != 0x0001 || !host.int_pending) {
+    printf("*** ERROR %s: after the step pc %04X int_pending %d"
+        " (expected 0001 1)\n", name, host.pc, host.int_pending);
+    return 1;
+  }
+  z80_check_interrupt(&host);
+  if (host.pc != clear.pc || host.sp != clear.sp ||
+      host.t_counter != clear.t_counter || host.cyc != clear.cyc ||
+      host.iff1 != clear.iff1 || host.iff2 != clear.iff2 ||
+      host.r != clear.r || host.mem_ptr != clear.mem_ptr ||
+      host.int_pending || ack_calls != 1 ||
+      ack_bus_start != clear_bus || ack_sample_t != clear_sample ||
+      ack_t_counter != clear_t) {
+    printf("*** ERROR %s: host pc %04X sp %04X t %lu cyc %lu pending %d"
+        " (clear pc %04X sp %04X t %lu cyc %lu)\n", name, host.pc, host.sp,
+        host.t_counter, host.cyc, host.int_pending, clear.pc, clear.sp,
+        clear.t_counter, clear.cyc);
+    return 1;
+  }
+  return 0;
+}
+
+// Flag set with EI first: nothing is accepted at EI's boundary or by the
+// host's check there; the next step takes it.
+static int check_hostcheck_ei(void) {
+  const char* name = "flag set after ei";
+  z80 z;
+  init_ack_cpu(&z);
+  z.int_check_by_host = true;
+  memory[0x0000] = 0xFB; // ei
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  if (z.pc != 0x0001 || !z.int_pending) {
+    printf("*** ERROR %s: after EI pc %04X int_pending %d"
+        " (expected 0001 1)\n", name, z.pc, z.int_pending);
+    return 1;
+  }
+  z80_check_interrupt(&z);
+  if (z.pc != 0x0001 || !z.int_pending) {
+    printf("*** ERROR %s: host check accepted at EI's boundary (pc %04X)\n",
+        name, z.pc);
+    return 1;
+  }
+  z80_step(&z); // nop
+  if (z.pc != 0x0002 || !z.int_pending) {
+    printf("*** ERROR %s: after the next step pc %04X int_pending %d"
+        " (expected 0002 1)\n", name, z.pc, z.int_pending);
+    return 1;
+  }
+  z80_check_interrupt(&z);
+  if (z.pc != 0x0038 || z.int_pending || ack_calls != 1) {
+    printf("*** ERROR %s: pc %04X int_pending %d calls %d"
+        " (expected 0038 0 1)\n", name, z.pc, z.int_pending, ack_calls);
+    return 1;
+  }
+  return 0;
+}
+
+// z80_init() clears the flag: a garbage-filled struct still steps flag-clear.
+static int check_hostcheck_init(void) {
+  const char* name = "init clears the flag";
+  z80 z;
+  memset(&z, 0xA5, sizeof z);
+  z80_init(&z);
+  z.read_byte = rb;
+  z.write_byte = wb;
+  z.port_in = in;
+  z.port_out = out;
+  memset(memory, 0, MEMORY_SIZE); // NOPs everywhere
+  z.pc = 0;
+  z.sp = 0xF000;
+  z.interrupt_mode = 1;
+  z.iff1 = 1;
+  z.iff2 = 1;
+  z.int_ack = record_ack;
+  ack_calls = 0;
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  if (z.int_check_by_host) {
+    printf("*** ERROR %s: flag still set after z80_init()\n", name);
+    return 1;
+  }
+  if (z.pc != 0x0038 || z.int_pending) {
+    printf("*** ERROR %s: pc %04X int_pending %d (expected 0038 0)\n",
+        name, z.pc, z.int_pending);
+    return 1;
+  }
+  return 0;
+}
+
+static int run_hostcheck_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  r += check_hostcheck_clear();
+  r += check_hostcheck_set();
+  r += check_hostcheck_ei();
+  r += check_hostcheck_init();
+  printf("*** host check test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: test runner
 static int run_test(
     z80* const z, const char* filename, unsigned long cyc_expected) {
@@ -1228,6 +1407,9 @@ int main(int argc, char** argv) {
   }
   if (argc > 1 && strcmp(argv[1], "pushorder") == 0) {
     return run_push_order_test();
+  }
+  if (argc > 1 && strcmp(argv[1], "hostcheck") == 0) {
+    return run_hostcheck_test();
   }
   if (argc > 1 && strcmp(argv[1], "cycsource") == 0) {
     return run_cyc_source_test();

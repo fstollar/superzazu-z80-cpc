@@ -881,9 +881,6 @@ static inline void process_interrupts(z80* const z) {
     // state; the call (or the IM 0 instruction below) latches Q itself.
     q_clear(z);
 
-    if (z->int_ack)
-      z->int_ack(z);
-
     switch (z->interrupt_mode) {
     case 0:
       // The first byte (int_data) is read in the INTA M1 cycle. PC stays
@@ -891,9 +888,12 @@ static inline void process_interrupts(z80* const z) {
       // after the first come from im0_bus (or the defaults). R is refreshed
       // once per M1 by exec_opcode and the prefix handlers.
       //
-      // The INTA cycle and the off-bus bytes run with no host callback;
-      // the instruction body then accounts for the rest.
+      // The INTA cycle and the off-bus bytes run with no host memory
+      // callback; the INTA cycle runs the acknowledge hook above. The
+      // instruction body then accounts for the rest.
       inta(z);
+      if (z->int_ack)
+        z->int_ack(z);
       z->cyc += z->timing->int_ack_im0;
       z->im0_active = 1;
       q_clear(z);
@@ -903,21 +903,25 @@ static inline void process_interrupts(z80* const z) {
 
     case 1:
       inc_r(z);
-      // Same shape as NMI above: no callback of its own, one internal T
-      // in call(), the INTA cycle up front.
+      // Same shape as NMI above: one internal T in call(), the INTA cycle
+      // up front, which runs the acknowledge hook.
       inta(z);
+      if (z->int_ack)
+        z->int_ack(z);
       z->cyc += z->timing->int_ack_im1;
       call(z, 0x38);
       break;
 
     case 2: {
       inc_r(z);
-      // The whole acknowledge answers with no callback of its own: the
-      // INTA cycle, one internal T, then the two vector-table reads back
-      // to back, then the two stack pushes back to back. call() is not
-      // reused here: its internal T sits ahead of the pushes, but the
-      // vector reads come between the two.
+      // The whole acknowledge answers with no host memory callback of its
+      // own: the INTA cycle (which runs the acknowledge hook), one internal
+      // T, then the two vector-table reads back to back, then the two stack
+      // pushes back to back. call() is not reused here: its internal T sits
+      // ahead of the pushes, but the vector reads come between the two.
       inta(z);
+      if (z->int_ack)
+        z->int_ack(z);
       internal_t_states(z, 1);
       z->cyc += z->timing->int_ack_im2;
       // Real Z80 hardware quirk: the jump address's high byte is read from
@@ -956,6 +960,7 @@ void z80_init(z80* const z) {
   z->port_in = NULL;
   z->port_out = NULL;
   z->int_ack = NULL;
+  z->int_check_by_host = false;
   z->im0_bus = NULL;
   z->im0_active = 0;
   z->userdata = NULL;
@@ -1055,7 +1060,10 @@ void z80_step(z80* const z) {
   // below keeps today's whole-instruction behaviour.
   z->int_sample_point = z->t_counter - 1;
 
-  process_interrupts(z);
+  // With int_check_by_host the host runs the check itself once its INT and
+  // NMI inputs reflect the recorded sample point; otherwise check at once.
+  if (!z->int_check_by_host)
+    process_interrupts(z);
 
   // The Q latch: F when the step wrote the flags, else 0.
   z->q = z->flags_written ? get_f(z) : 0;
