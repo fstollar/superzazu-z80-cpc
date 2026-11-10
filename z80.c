@@ -869,6 +869,16 @@ static inline uint16_t displace(
 }
 
 static inline void process_interrupts(z80* const z) {
+  // An NMI/IM1/IM2 acknowledge is charged like a step, from the slot the
+  // next opcode fetch would have sampled to the slot after the
+  // acknowledge. The start slot is recorded up front so the end charge
+  // below spans the whole acknowledge; IM 0 keeps the table, its
+  // instruction runs off the bus.
+  const bool ack_derived = !cyc_table_now(z);
+  const unsigned ack_free_phase =
+      ack_derived ? wait_free_phase(z->periodic_wait_mask) : 0;
+  const unsigned long ack_start_slot =
+      ack_derived ? align_free_slot(z->t_counter + 1, ack_free_phase) : 0;
   // NMI is recognised at the end of every instruction, whatever the
   // interrupt flip-flops say -- so also right after EI.
   if (z->nmi_pending) {
@@ -884,8 +894,12 @@ static inline void process_interrupts(z80* const z) {
     z->port_high_byte_from_a = false;
     apply_sampled_waits(z, z->t_counter + 1);
     z->t_counter += 4;
-    z->cyc += z->timing->nmi_ack;
+    if (!ack_derived)
+      z->cyc += z->timing->nmi_ack;
     call(z, 0x66);
+    if (ack_derived)
+      z->cyc += (align_free_slot(z->t_counter + 1, ack_free_phase) -
+          ack_start_slot) / 4;
     return;
   }
 
@@ -938,8 +952,12 @@ static inline void process_interrupts(z80* const z) {
       inta(z);
       if (z->int_ack)
         z->int_ack(z);
-      z->cyc += z->timing->int_ack_im1;
+      if (!ack_derived)
+        z->cyc += z->timing->int_ack_im1;
       call(z, 0x38);
+      if (ack_derived)
+        z->cyc += (align_free_slot(z->t_counter + 1, ack_free_phase) -
+            ack_start_slot) / 4;
       break;
 
     case 2: {
@@ -953,7 +971,8 @@ static inline void process_interrupts(z80* const z) {
       if (z->int_ack)
         z->int_ack(z);
       internal_t_states(z, 1);
-      z->cyc += z->timing->int_ack_im2;
+      if (!ack_derived)
+        z->cyc += z->timing->int_ack_im2;
       // Real Z80 hardware quirk: the jump address's high byte is read from
       // I<<8|(int_data+1), wrapping within the *same* page when int_data is
       // 0xFF (I<<8|0x00), not from the next page like a plain 16-bit
@@ -969,6 +988,9 @@ static inline void process_interrupts(z80* const z) {
       pushw(z, z->pc);
       z->pc = vec;
       z->mem_ptr = vec;
+      if (ack_derived)
+        z->cyc += (align_free_slot(z->t_counter + 1, ack_free_phase) -
+            ack_start_slot) / 4;
       break;
     }
 

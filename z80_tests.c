@@ -1873,6 +1873,59 @@ static int run_strobe_test(void) {
   return r != 0;
 }
 
+// MARK: derived acknowledge charge
+// Under Z80_CYC_FROM_WAIT_SLOTS an NMI/IM1/IM2 acknowledge charges its own
+// span the way a step does, so the step total is the instruction span plus
+// the acknowledge span (NOP 5/7/4, INC BC 4/6/4); IM 0 keeps its table
+// charge on top of the derived instruction span and the off-bus
+// instruction's own table charge.
+static int check_ack_span(const char* name, int mode, int nmi, uint8_t op,
+    uint8_t data, unsigned long exp_cyc, uint16_t exp_pc) {
+  z80 z;
+  init_ack_cpu(&z);
+  z80_set_timing(&z, &z80_timing_cpc);
+  z80_set_cyc_source(&z, Z80_CYC_FROM_WAIT_SLOTS);
+  z.periodic_wait_mask = 0xD;
+  z.interrupt_mode = (uint8_t)mode;
+  z.i = 0x10;
+  memory[0x0000] = op;
+  memory[0x1020] = 0x34;
+  memory[0x1021] = 0x12;
+  if (nmi)
+    z80_gen_nmi(&z);
+  else
+    z80_gen_int(&z, data);
+  z80_step(&z);
+  if (z.cyc != exp_cyc || z.pc != exp_pc) {
+    printf("*** ERROR %s: cyc %lu pc %04X (expected %lu %04X)\n",
+        name, z.cyc, z.pc, exp_cyc, exp_pc);
+    return 1;
+  }
+  return 0;
+}
+
+static int run_ackcyc_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  // The instruction span (NOP one period, INC BC two) plus the acknowledge
+  // span.
+  r += check_ack_span("nop im1", 1, 0, 0x00, 0xFF, 6, 0x0038);
+  r += check_ack_span("nop im2", 2, 0, 0x00, 0x20, 8, 0x1234);
+  r += check_ack_span("nop nmi", 0, 1, 0x00, 0xFF, 5, 0x0066);
+  r += check_ack_span("incbc im1", 1, 0, 0x03, 0xFF, 6, 0x0038);
+  r += check_ack_span("incbc im2", 2, 0, 0x03, 0x20, 8, 0x1234);
+  r += check_ack_span("incbc nmi", 0, 1, 0x03, 0xFF, 6, 0x0066);
+  // IM 0 keeps the table: the derived NOP span, the acknowledge table
+  // charge, and the off-bus NOP's own table charge.
+  r += check_ack_span("nop im0", 0, 0, 0x00, 0x00, 3, 0x0001);
+  printf("*** acknowledge charge test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: test runner
 static int run_test(
     z80* const z, const char* filename, unsigned long cyc_expected) {
@@ -1952,6 +2005,9 @@ int main(int argc, char** argv) {
   }
   if (argc > 1 && strcmp(argv[1], "strobe") == 0) {
     return run_strobe_test();
+  }
+  if (argc > 1 && strcmp(argv[1], "ackcyc") == 0) {
+    return run_ackcyc_test();
   }
 
   memory = malloc(MEMORY_SIZE);
