@@ -47,6 +47,18 @@ static unsigned long align_free_slot(unsigned long stamp, unsigned free_phase) {
   return stamp + ((free_phase - stamp) & 3u);
 }
 
+// First slot at or after stamp that the WAIT mask leaves free: the slot
+// loop of apply_sampled_waits above without the counter side effects, so
+// the M1 really samples there even when the mask leaves several phases
+// free. A mask with no clear slot is ignored, like there.
+static unsigned long first_free_slot(unsigned long stamp, unsigned long mask) {
+  if ((mask & 0xFu) == 0xFu)
+    return stamp;
+  while ((mask >> (stamp & 3u)) & 1u)
+    stamp++;
+  return stamp;
+}
+
 // Whether this step derives cyc from the WAIT-sampled slots: the source
 // selects it and the mask leaves exactly one phase free. Evaluated once at
 // z80_step entry and latched in cyc_derived_step below; the charge sites
@@ -166,12 +178,14 @@ static inline uint16_t nextw(z80* const z) {
   if (z->im0_active) {
     // IM 0: both bytes are read at the frozen PC, low byte first.
     z->bus_cycle_start = z->t_counter;
+    z->port_high_byte_from_a = false;
     apply_sampled_waits(z, z->t_counter + 1);
     z->t_counter += 3;
     const uint8_t lo = z->im0_bus
         ? z->im0_bus(z, z->pc, Z80_IM0_READ)
         : z->read_byte(z->userdata, z->pc, Z80_READ_OPERAND);
     z->bus_cycle_start = z->t_counter;
+    z->port_high_byte_from_a = false;
     apply_sampled_waits(z, z->t_counter + 1);
     z->t_counter += 3;
     const uint8_t hi = z->im0_bus
@@ -867,6 +881,7 @@ static inline void process_interrupts(z80* const z) {
     // The acknowledge M1 answers with no bus callback of its own; call()
     // carries one of its internal T, the rest runs here up front.
     z->bus_cycle_start = z->t_counter;
+    z->port_high_byte_from_a = false;
     apply_sampled_waits(z, z->t_counter + 1);
     z->t_counter += 4;
     z->cyc += z->timing->nmi_ack;
@@ -986,6 +1001,8 @@ void z80_init(z80* const z) {
   z->periodic_wait_mask = 0;
   z->wait_sample_t = 0;
   z->int_sample_point = 0;
+  z->step_m1_sample_tstate = 0;
+  z->port_high_byte_from_a = false;
   z->timing = &z80_timing_generic;
   z->cyc_source = Z80_CYC_FROM_TABLE;
   z->cyc_derived_step = 0;
@@ -1072,14 +1089,13 @@ void z80_step(z80* const z) {
   const unsigned free_phase = derived_now ? wait_free_phase(z->periodic_wait_mask) : 0;
   // The step's M1 sample slot: the first slot at or after one T past the
   // entry counter that the mask leaves free (entry T plus one when the
-  // mask stretches nothing). This uses the mask's own free phase, not the
+  // mask stretches nothing). This reads the mask itself, not the
   // derived-mode latch above (which is 0 outside derived mode): the slot
   // is set on both cycle-count sources. The derived charge below spans
   // from this same slot, so both agree even if a callback changes the
   // mask or the source mid-step; acknowledges never rewrite it, so it
   // still names the instruction's own slot after a trailing acknowledge.
-  const unsigned entry_free = wait_free_phase(z->periodic_wait_mask);
-  z->step_m1_sample_tstate = entry_free < 4 ? align_free_slot(z->t_counter + 1, entry_free) : z->t_counter + 1;
+  z->step_m1_sample_tstate = first_free_slot(z->t_counter + 1, z->periodic_wait_mask);
   const unsigned long start_slot = derived_now ? z->step_m1_sample_tstate : 0;
   if (z->halted) {
     // A halted CPU keeps fetching NOPs with no bus-visible advance here

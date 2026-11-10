@@ -1349,11 +1349,17 @@ static int check_hostcheck_ei(void) {
 }
 
 // z80_init() clears the flag: a garbage-filled struct still steps flag-clear.
+// It also zeroes the M1 sample slot and the A-sourced port flag.
 static int check_hostcheck_init(void) {
   const char* name = "init clears the flag";
   z80 z;
   memset(&z, 0xA5, sizeof z);
   z80_init(&z);
+  if (z.step_m1_sample_tstate != 0 || z.port_high_byte_from_a) {
+    printf("*** ERROR %s: sample slot %lu high-byte flag %d (want 0 0)\n",
+        name, z.step_m1_sample_tstate, z.port_high_byte_from_a);
+    return 1;
+  }
   z.read_byte = rb;
   z.write_byte = wb;
   z.port_in = in;
@@ -1595,7 +1601,8 @@ static unsigned long strobe_slot_0xd(unsigned long entry) {
 }
 
 static int check_strobe_shape(const char* name, const uint8_t* bytes,
-    const char* want_kinds, int port_kind, int derived, int settles_first) {
+    const char* want_kinds, int port_kind, int derived, int settles_first,
+    long want_rel_begin, long want_rel_end) {
   int failed = 0;
   static const uint8_t masks[] = {0x0, 0xD};
   for (unsigned mi = 0; mi < sizeof masks; mi++)
@@ -1679,6 +1686,30 @@ static int check_strobe_shape(const char* name, const uint8_t* bytes,
           strobe_events[0].sample, base, want_slot);
       failed = 1;
     }
+    // Literal half-T /IORQ row of the port access, relative to the grid
+    // origin, under the one-free-phase mask. Mask 0 stretches nothing, so
+    // its windows are narrower and not listed here.
+    if (want_rel_begin >= 0 && masks[mi] == 0xD) {
+      size_t pi = want_count;
+      for (size_t i = 0; i < want_count; i++)
+        if (strobe_events[i].kind == 'i' || strobe_events[i].kind == 'o') {
+          pi = i;
+          break;
+        }
+      if (pi >= want_count) {
+        printf("*** ERROR %s: no port access for the literal row\n", where);
+        failed = 1;
+      } else {
+        const unsigned long origin = 2 * (z.step_m1_sample_tstate - 1);
+        const long got_begin = (long)(strobe_events[pi].iorq_begin - origin);
+        const long got_end = (long)(strobe_events[pi].iorq_end - origin);
+        if (got_begin != want_rel_begin || got_end != want_rel_end) {
+          printf("*** ERROR %s: port /IORQ [%ld,%ld) (want [%ld,%ld))\n",
+              where, got_begin, got_end, want_rel_begin, want_rel_end);
+          failed = 1;
+        }
+      }
+    }
   }
   return failed;
 }
@@ -1717,6 +1748,95 @@ static int check_strobe_ack_slot(void) {
   return failed;
 }
 
+// Masks with several free phases: the slot is the first free slot at or
+// after entry T plus one, which is also where the first M1 fetch samples.
+static int check_sample_slot_rows(void) {
+  int failed = 0;
+  static const struct { unsigned mask; unsigned long entry, want; } rows[] = {
+    {0x1, 3, 5}, {0x3, 0, 2}, {0x3, 3, 6}, {0x5, 1, 3},
+    {0x5, 3, 5}, {0x9, 2, 5}, {0x9, 3, 5}, {0xD, 2, 5},
+  };
+  for (size_t ri = 0; ri < sizeof rows / sizeof rows[0]; ri++) {
+    z80 z;
+    z80_init(&z);
+    z.read_byte = strobe_rb;
+    z.write_byte = strobe_wb;
+    z.port_in = strobe_in;
+    z.port_out = strobe_out;
+    memset(memory, 0, MEMORY_SIZE);
+    memory[0x1000] = 0x00; // NOP
+    z.pc = 0x1000;
+    z.sp = 0xF000;
+    z.t_counter = rows[ri].entry;
+    z.periodic_wait_mask = (uint8_t)rows[ri].mask;
+    strobe_cpu = &z;
+    strobe_event_count = 0;
+    z80_step(&z);
+    if (z.step_m1_sample_tstate != rows[ri].want) {
+      printf("*** ERROR slot mask=%X entry=%lu: slot %lu (want %lu)\n",
+          rows[ri].mask, rows[ri].entry,
+          z.step_m1_sample_tstate, rows[ri].want);
+      failed = 1;
+    }
+    if (strobe_event_count < 1 || strobe_events[0].kind != 'm' ||
+        strobe_events[0].sample != rows[ri].want) {
+      printf("*** ERROR slot mask=%X entry=%lu: first fetch samples %lu (want %lu)\n",
+          rows[ri].mask, rows[ri].entry,
+          strobe_event_count < 1 ? 9999 : strobe_events[0].sample, rows[ri].want);
+      failed = 1;
+    }
+  }
+  return failed;
+}
+
+static int im0_observed_high;
+static uint8_t im0_observe_bus(z80* const z, uint16_t pc, z80_im0_cycle_t cycle) {
+  (void)pc;
+  (void)cycle;
+  if (z->port_high_byte_from_a)
+    im0_observed_high = 1;
+  return 0x00;
+}
+
+// The A-sourced port flag is clear for every non-port bus cycle: an IM0
+// CALL acknowledged right after an OUT (n),A reads its bytes through
+// im0_bus with the flag clear.
+static int check_im0_clears_high_byte(void) {
+  const char* name = "im0 clears the high byte flag";
+  z80 z;
+  z80_init(&z);
+  z.read_byte = strobe_rb;
+  z.write_byte = strobe_wb;
+  z.port_in = strobe_in;
+  z.port_out = strobe_out;
+  memset(memory, 0, MEMORY_SIZE);
+  memory[0x1000] = 0xD3; // OUT (n),A sets the flag on its port cycle
+  memory[0x1001] = 0x34;
+  z.pc = 0x1000;
+  z.sp = 0xF000;
+  z.a = 0x56;
+  z.iff1 = 1; // the trailing check only acknowledges with iff1 set
+  strobe_cpu = &z;
+  strobe_event_count = 0;
+  z80_step(&z);
+  if (!z.port_high_byte_from_a) {
+    printf("*** ERROR %s: OUT (n),A left the flag clear\n", name);
+    return 1;
+  }
+  z.interrupt_mode = 0;
+  z80_gen_int(&z, 0xCD); // CALL: its bytes arrive through im0_bus
+  z.im0_bus = im0_observe_bus;
+  im0_observed_high = 0;
+  strobe_event_count = 0;
+  z80_step(&z);
+  if (z.pc != 0x0000 || im0_observed_high) {
+    printf("*** ERROR %s: pc %04X flag seen high %d (want 0000 0)\n",
+        name, z.pc, im0_observed_high);
+    return 1;
+  }
+  return 0;
+}
+
 static int run_strobe_test(void) {
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
@@ -1730,17 +1850,23 @@ static int run_strobe_test(void) {
   static const uint8_t out_n_a[] = {0xD3, 0x34, 0, 0, 0, 0, 0, 0};
   static const uint8_t in_b_c[] = {0xED, 0x40, 0, 0, 0, 0, 0, 0};
   static const uint8_t out_c_b[] = {0xED, 0x41, 0, 0, 0, 0, 0, 0};
+  static const uint8_t outi[] = {0xED, 0xA3, 0, 0, 0, 0, 0, 0};
+  static const uint8_t ini[] = {0xED, 0xA2, 0, 0, 0, 0, 0, 0};
   static const uint8_t halt[] = {0x76, 0, 0, 0, 0, 0, 0, 0};
   for (int derived = 0; derived < 2; derived++) {
-    r += check_strobe_shape("nop", nop, "m", 0, derived, 0);
-    r += check_strobe_shape("ld a,(nn)", ld_a_nn, "mrrr", 0, derived, 0);
-    r += check_strobe_shape("ld (nn),a", ld_nn_a, "mrrw", 0, derived, 0);
-    r += check_strobe_shape("in a,(n)", in_a_n, "mri", 'i', derived, 0);
-    r += check_strobe_shape("out (n),a", out_n_a, "mro", 'o', derived, 0);
-    r += check_strobe_shape("in b,(c)", in_b_c, "mmi", 0, derived, 0);
-    r += check_strobe_shape("out (c),b", out_c_b, "mmo", 0, derived, 0);
-    r += check_strobe_shape("halt", halt, "", 0, derived, 1);
+    r += check_strobe_shape("nop", nop, "m", 0, derived, 0, -1, -1);
+    r += check_strobe_shape("ld a,(nn)", ld_a_nn, "mrrr", 0, derived, 0, -1, -1);
+    r += check_strobe_shape("ld (nn),a", ld_nn_a, "mrrw", 0, derived, 0, -1, -1);
+    r += check_strobe_shape("in a,(n)", in_a_n, "mri", 'i', derived, 0, 16, 21);
+    r += check_strobe_shape("out (n),a", out_n_a, "mro", 'o', derived, 0, 16, 21);
+    r += check_strobe_shape("in b,(c)", in_b_c, "mmi", 0, derived, 0, 18, 29);
+    r += check_strobe_shape("out (c),b", out_c_b, "mmo", 0, derived, 0, 18, 29);
+    r += check_strobe_shape("outi", outi, "mmro", 0, derived, 0, 32, 37);
+    r += check_strobe_shape("ini", ini, "mmiw", 0, derived, 0, 20, 29);
+    r += check_strobe_shape("halt", halt, "", 0, derived, 1, -1, -1);
   }
+  r += check_sample_slot_rows();
+  r += check_im0_clears_high_byte();
   r += check_strobe_ack_slot();
   printf("*** strobe windows test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);
