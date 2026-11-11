@@ -582,6 +582,78 @@ static int run_reti_iff_test(void) {
   return r != 0;
 }
 
+// MARK: stray DD/FD prefix and R
+// A stray DD/FD prefix costs one R increment of its own, like every M1
+// fetch, and the instruction after it runs with the R its own fetches
+// produce: LD A,R behind one stray prefix reads R0 + 3 (prefix, ED, ED
+// op) and behind two R0 + 4; LD R,A leaves R = A in both cases. The R
+// undo for the stray prefix runs before the following instruction, so an
+// inner LD A,R / LD R,A never sees the not-yet-undone increment
+// (z80-documented section 6.1).
+static void init_stray_r_cpu(z80* const z) {
+  z80_init(z);
+  z->read_byte = rb;
+  z->write_byte = wb;
+  z->port_in = in;
+  z->port_out = out;
+  z80_set_timing(z, &z80_timing_cpc);
+  memset(memory, 0, MEMORY_SIZE); // NOPs everywhere
+  z->pc = 0;
+  z->sp = 0xF000;
+  z->r = 0x10;
+  z->a = 0x50;
+}
+
+static int check_ld_a_r_after_stray(const char* name, int strays,
+    uint8_t exp_a, uint8_t exp_r) {
+  z80 z;
+  init_stray_r_cpu(&z);
+  for (int i = 0; i < strays; i++) {
+    memory[i] = 0xDD;
+  }
+  memory[strays] = 0xED;
+  memory[strays + 1] = 0x5F; // ld a,r
+  z80_step(&z);
+  if (z.a != exp_a || z.r != exp_r || z.pc != (uint16_t)(strays + 2)) {
+    printf("*** ERROR %s: a %02X r %02X pc %04X (expected %02X %02X %04X)\n",
+        name, z.a, z.r, z.pc, exp_a, exp_r, strays + 2);
+    return 1;
+  }
+  return 0;
+}
+
+static int check_ld_r_a_after_stray(const char* name, int strays) {
+  z80 z;
+  init_stray_r_cpu(&z);
+  for (int i = 0; i < strays; i++) {
+    memory[i] = 0xDD;
+  }
+  memory[strays] = 0xED;
+  memory[strays + 1] = 0x4F; // ld r,a
+  z80_step(&z);
+  if (z.r != 0x50 || z.a != 0x50 || z.pc != (uint16_t)(strays + 2)) {
+    printf("*** ERROR %s: a %02X r %02X pc %04X (expected 50 50 %04X)\n",
+        name, z.a, z.r, z.pc, strays + 2);
+    return 1;
+  }
+  return 0;
+}
+
+static int run_stray_r_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  r += check_ld_a_r_after_stray("dd ed 5f", 1, 0x13, 0x13);
+  r += check_ld_a_r_after_stray("dd dd ed 5f", 2, 0x14, 0x14);
+  r += check_ld_r_a_after_stray("dd ed 4f", 1);
+  r += check_ld_r_a_after_stray("dd dd ed 4f", 2);
+  printf("*** stray prefix R test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: Q latch
 // The core keeps an 8-bit Q latch behind SCF/CCF's undocumented X/Y
 // flags: after an instruction that wrote the flags Q holds F, otherwise
@@ -2163,6 +2235,9 @@ int main(int argc, char** argv) {
   if (argc > 1 && strcmp(argv[1], "retiiff") == 0) {
     return run_reti_iff_test();
   }
+  if (argc > 1 && strcmp(argv[1], "strayr") == 0) {
+    return run_stray_r_test();
+  }
   if (argc > 1 && strcmp(argv[1], "qlatch") == 0) {
     return run_qlatch_test();
   }
@@ -2217,6 +2292,7 @@ int main(int argc, char** argv) {
     r += run_memptr_test();
     r += run_ei_delay_test();
     r += run_reti_iff_test();
+    r += run_stray_r_test();
     r += run_qlatch_test();
     r += run_cyc_source_test();
   }
