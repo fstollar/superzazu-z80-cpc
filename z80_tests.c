@@ -1174,9 +1174,10 @@ static int run_im2order_test(void) {
   int r = 0;
   // Plain vector byte: the table entry is I<<8|data and the next byte.
   r += check_im2order("im2 push first", 0x20, 0x1020, 0x1021, 0x34, 0x12, 0x1234);
-  // Vector byte 0xFF: the high byte wraps within the same page
-  // (I<<8|0x00), it does not spill into the next page.
-  r += check_im2order("im2 push first wrap", 0xFF, 0x10FF, 0x1000, 0x78, 0x56, 0x5678);
+  // Vector byte 0xFF: the high byte comes from the next page, a plain
+  // 16-bit increment of the vector address, the way the other emulators
+  // read it.
+  r += check_im2order("im2 push first page carry", 0xFF, 0x10FF, 0x1100, 0x78, 0x56, 0x5678);
   printf("*** im2 order test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);
   return r != 0;
