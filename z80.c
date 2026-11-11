@@ -356,8 +356,10 @@ static inline void cond_jump(z80* const z, bool condition) {
 
 // calls to next word in memory. The call closes its M3 with one internal
 // T (the pushed address is settled) ahead of the two stack writes; RST,
-// taken CALL, NMI and IM1 all share this shape (IM2 reads its vector
-// after the pushes, so it pushes directly).
+// taken CALL, NMI and IM1 all share this shape. IM2 pushes directly too,
+// but it cannot reuse call(): call() needs the target before it pushes,
+// and IM2 learns the target only from the vector reads that come after
+// the pushes.
 static inline void call(z80* const z, uint16_t addr) {
   internal_t_states(z, 1);
   pushw(z, z->pc);
@@ -971,9 +973,8 @@ static inline void process_interrupts(z80* const z) {
       // The whole acknowledge answers with no host memory callback of its
       // own: the INTA cycle (which runs the acknowledge hook), one internal
       // T, then the two stack pushes back to back, then the two
-      // vector-table reads back to back. call() is not reused here: its
-      // internal T sits ahead of the pushes, but the vector reads come
-      // after them.
+      // vector-table reads back to back. Not call() above: the jump
+      // target is only known after the reads, so the pushes run first.
       inta(z);
       if (z->int_ack)
         z->int_ack(z);
@@ -981,10 +982,12 @@ static inline void process_interrupts(z80* const z) {
       if (!ack_derived)
         z->cyc += z->timing->int_ack_im2;
       pushw(z, z->pc);
-      // Real Z80 hardware quirk: the jump address's high byte is read from
-      // I<<8|(int_data+1), wrapping within the *same* page when int_data is
-      // 0xFF (I<<8|0x00), not from the next page like a plain 16-bit
-      // increment -- rw() can't be reused here since it does the latter.
+      // This core reads the jump address's high byte from
+      // I<<8|((int_data+1) & 0xFF), wrapping within the *same* page when
+      // int_data is 0xFF (I<<8|0x00). That is this core's own behaviour,
+      // unsourced: the other emulators carry into the next page (a plain
+      // 16-bit increment), which is what rw() does, so rw() can't be
+      // reused here.
       const uint16_t addr_lo = (uint16_t)(z->i << 8) | z->int_data;
       const uint16_t addr_hi = (uint16_t)(z->i << 8) | ((z->int_data + 1) & 0xFF);
       // im2_vector -- the two IM2 vector-table reads. Low byte

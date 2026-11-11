@@ -1093,7 +1093,8 @@ static void im2order_wb(void* userdata, uint16_t addr, uint8_t val) {
 // puts the four acknowledge cycles at T 11/14/17/20. Push first means the
 // two stack writes (PCH to SP - 1, PCL to SP - 2) come ahead of the two
 // vector reads; the jump target and the pushed bytes pin the addresses and
-// data. The T counter span is the same in either order.
+// data, and MEMPTR must end on the jump target read from the table. The T
+// counter span is the same in either order.
 static int check_im2order(const char* name, uint8_t data, uint16_t vec_lo_addr,
     uint16_t vec_hi_addr, uint8_t vec_lo, uint8_t vec_hi, uint16_t target) {
   z80 z;
@@ -1156,9 +1157,10 @@ static int check_im2order(const char* name, uint8_t data, uint16_t vec_lo_addr,
       failed = 1;
     }
   }
-  if (z.pc != target || z.sp != 0xEFFE || z.t_counter != 23) {
-    printf("*** ERROR %s: pc %04X sp %04X t %lu (expected %04X EFFE 23)\n",
-        name, z.pc, z.sp, z.t_counter, target);
+  if (z.pc != target || z.sp != 0xEFFE || z.t_counter != 23 || z.mem_ptr != target) {
+    printf("*** ERROR %s: pc %04X sp %04X t %lu mem_ptr %04X"
+        " (expected %04X EFFE 23 %04X)\n",
+        name, z.pc, z.sp, z.t_counter, z.mem_ptr, target, target);
     failed = 1;
   }
   return failed;
