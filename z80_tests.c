@@ -1048,6 +1048,138 @@ static int run_push_order_test(void) {
   return r != 0;
 }
 
+// MARK: IM2 acknowledge bus order
+// The acknowledge pushes the return address before reading the vector, as
+// the Zilog sequence does: INTA, one internal T, push PCH, push PCL, read
+// the vector low byte, read the high byte, jump. The four cycles keep
+// their 3 T shape either way; only their order moves, so the T span is
+// unchanged and the jump target stays the same.
+#define IM2ORDER_MAX_EVENTS 8
+static struct {
+  char kind; // 'M' M1 fetch, 'v' vector-table read, 'r' other read, 'w' write
+  uint16_t addr;
+  uint8_t val;
+  unsigned long start; // bus_cycle_start: the cycle's first T
+} im2order_events[IM2ORDER_MAX_EVENTS];
+static int im2order_event_count;
+
+static uint8_t im2order_rb(void* userdata, uint16_t addr, z80_read_kind_t kind) {
+  z80* const z = (z80*)userdata;
+  if (im2order_event_count < IM2ORDER_MAX_EVENTS) {
+    im2order_events[im2order_event_count].kind =
+        kind == Z80_READ_IM2_VECTOR ? 'v' : (kind == Z80_READ_M1 ? 'M' : 'r');
+    im2order_events[im2order_event_count].addr = addr;
+    im2order_events[im2order_event_count].val = memory[addr];
+    im2order_events[im2order_event_count].start = z->bus_cycle_start;
+    im2order_event_count++;
+  }
+  return memory[addr];
+}
+
+static void im2order_wb(void* userdata, uint16_t addr, uint8_t val) {
+  z80* const z = (z80*)userdata;
+  if (im2order_event_count < IM2ORDER_MAX_EVENTS) {
+    im2order_events[im2order_event_count].kind = 'w';
+    im2order_events[im2order_event_count].addr = addr;
+    im2order_events[im2order_event_count].val = val;
+    im2order_events[im2order_event_count].start = z->bus_cycle_start;
+    im2order_event_count++;
+  }
+  memory[addr] = val;
+}
+
+// One IM2 acknowledge over a NOP with no WAIT stretching, so every T is
+// pinned: the NOP fetch opens at T 0, the INTA at T 4, then one internal T
+// puts the four acknowledge cycles at T 11/14/17/20. Push first means the
+// two stack writes (PCH to SP - 1, PCL to SP - 2) come ahead of the two
+// vector reads; the jump target and the pushed bytes pin the addresses and
+// data. The T counter span is the same in either order.
+static int check_im2order(const char* name, uint8_t data, uint16_t vec_lo_addr,
+    uint16_t vec_hi_addr, uint8_t vec_lo, uint8_t vec_hi, uint16_t target) {
+  z80 z;
+  z80_init(&z);
+  z.read_byte = im2order_rb;
+  z.write_byte = im2order_wb;
+  z.port_in = in;
+  z.port_out = out;
+  z.userdata = &z;
+  z.periodic_wait_mask = 0x0; // no stretching: absolute T below is exact
+  memset(memory, 0, MEMORY_SIZE); // NOPs everywhere
+  z.pc = 0;
+  z.sp = 0xF000;
+  z.interrupt_mode = 2;
+  z.iff1 = 1;
+  z.iff2 = 1;
+  z.i = 0x10;
+  memory[vec_lo_addr] = vec_lo;
+  memory[vec_hi_addr] = vec_hi;
+  im2order_event_count = 0;
+  z80_gen_int(&z, data);
+  z80_step(&z);
+  int failed = 0;
+  // The NOP return address 0x0001 pushes PCH 0x00 ahead of PCL 0x01.
+  static const struct {
+    char kind;
+    uint16_t addr;
+    uint8_t val;
+    unsigned long start;
+  } expected[] = {
+    {'M', 0x0000, 0x00, 0},
+    {'w', 0xEFFF, 0x00, 11},
+    {'w', 0xEFFE, 0x01, 14},
+    {'v', 0, 0, 17}, // addresses and bytes filled in below
+    {'v', 0, 0, 20},
+  };
+  if (im2order_event_count != 5) {
+    printf("*** ERROR %s: %d bus events (expected 5)\n", name, im2order_event_count);
+    return 1;
+  }
+  for (int i = 0; i < 5; ++i) {
+    uint16_t addr = expected[i].addr;
+    uint8_t val = expected[i].val;
+    if (i == 3) {
+      addr = vec_lo_addr;
+      val = vec_lo;
+    }
+    if (i == 4) {
+      addr = vec_hi_addr;
+      val = vec_hi;
+    }
+    if (im2order_events[i].kind != expected[i].kind ||
+        im2order_events[i].addr != addr || im2order_events[i].val != val ||
+        im2order_events[i].start != expected[i].start) {
+      printf("*** ERROR %s event %d: %c %04X %02X start %lu"
+          " (expected %c %04X %02X start %lu)\n", name, i,
+          im2order_events[i].kind, im2order_events[i].addr,
+          im2order_events[i].val, im2order_events[i].start,
+          expected[i].kind, addr, val, expected[i].start);
+      failed = 1;
+    }
+  }
+  if (z.pc != target || z.sp != 0xEFFE || z.t_counter != 23) {
+    printf("*** ERROR %s: pc %04X sp %04X t %lu (expected %04X EFFE 23)\n",
+        name, z.pc, z.sp, z.t_counter, target);
+    failed = 1;
+  }
+  return failed;
+}
+
+static int run_im2order_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  // Plain vector byte: the table entry is I<<8|data and the next byte.
+  r += check_im2order("im2 push first", 0x20, 0x1020, 0x1021, 0x34, 0x12, 0x1234);
+  // Vector byte 0xFF: the high byte wraps within the same page
+  // (I<<8|0x00), it does not spill into the next page.
+  r += check_im2order("im2 push first wrap", 0xFF, 0x10FF, 0x1000, 0x78, 0x56, 0x5678);
+  printf("*** im2 order test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: derived cycle-count source
 // With the source off (the default) the table charges are unchanged; with
 // it on and a WAIT mask with exactly one free phase, one step charges the
@@ -2033,6 +2165,9 @@ int main(int argc, char** argv) {
   }
   if (argc > 1 && strcmp(argv[1], "pushorder") == 0) {
     return run_push_order_test();
+  }
+  if (argc > 1 && strcmp(argv[1], "im2order") == 0) {
+    return run_im2order_test();
   }
   if (argc > 1 && strcmp(argv[1], "hostcheck") == 0) {
     return run_hostcheck_test();
