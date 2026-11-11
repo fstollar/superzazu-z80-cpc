@@ -982,14 +982,11 @@ static inline void process_interrupts(z80* const z) {
       if (!ack_derived)
         z->cyc += z->timing->int_ack_im2;
       pushw(z, z->pc);
-      // This core reads the jump address's high byte from
-      // I<<8|((int_data+1) & 0xFF), wrapping within the *same* page when
-      // int_data is 0xFF (I<<8|0x00). That is this core's own behaviour,
-      // unsourced: the other emulators carry into the next page (a plain
-      // 16-bit increment), which is what rw() does, so rw() can't be
-      // reused here.
+      // The jump address's high byte comes from the next address with
+      // a 16-bit carry, as the other emulators do: vector byte 0xFF
+      // reads (I+1):00, not I:00. Not confirmed on hardware.
       const uint16_t addr_lo = (uint16_t)(z->i << 8) | z->int_data;
-      const uint16_t addr_hi = (uint16_t)(z->i << 8) | ((z->int_data + 1) & 0xFF);
+      const uint16_t addr_hi = (uint16_t)(addr_lo + 1);
       // im2_vector -- the two IM2 vector-table reads. Low byte
       // first, as the Z80 bus does, sequenced explicitly: the old single
       // expression left the two rb() calls unsequenced.
