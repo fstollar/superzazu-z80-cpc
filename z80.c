@@ -357,7 +357,7 @@ static inline void cond_jump(z80* const z, bool condition) {
 // calls to next word in memory. The call closes its M3 with one internal
 // T (the pushed address is settled) ahead of the two stack writes; RST,
 // taken CALL, NMI and IM1 all share this shape (IM2 reads its vector
-// between the internal stretch and the pushes, so it pushes directly).
+// after the pushes, so it pushes directly).
 static inline void call(z80* const z, uint16_t addr) {
   internal_t_states(z, 1);
   pushw(z, z->pc);
@@ -970,15 +970,17 @@ static inline void process_interrupts(z80* const z) {
       inc_r(z);
       // The whole acknowledge answers with no host memory callback of its
       // own: the INTA cycle (which runs the acknowledge hook), one internal
-      // T, then the two vector-table reads back to back, then the two stack
-      // pushes back to back. call() is not reused here: its internal T sits
-      // ahead of the pushes, but the vector reads come between the two.
+      // T, then the two stack pushes back to back, then the two
+      // vector-table reads back to back. call() is not reused here: its
+      // internal T sits ahead of the pushes, but the vector reads come
+      // after them.
       inta(z);
       if (z->int_ack)
         z->int_ack(z);
       internal_t_states(z, 1);
       if (!ack_derived)
         z->cyc += z->timing->int_ack_im2;
+      pushw(z, z->pc);
       // Real Z80 hardware quirk: the jump address's high byte is read from
       // I<<8|(int_data+1), wrapping within the *same* page when int_data is
       // 0xFF (I<<8|0x00), not from the next page like a plain 16-bit
@@ -991,7 +993,6 @@ static inline void process_interrupts(z80* const z) {
       const uint8_t vec_lo = rb_im2(z, addr_lo);
       const uint8_t vec_hi = rb_im2(z, addr_hi);
       const uint16_t vec = (uint16_t)(vec_hi << 8) | vec_lo;
-      pushw(z, z->pc);
       z->pc = vec;
       z->mem_ptr = vec;
       if (ack_derived)
