@@ -1868,10 +1868,13 @@ void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
   } break;
 
   default: {
-    // any other FD/DD opcode behaves as a non-prefixed opcode:
-    exec_opcode(z, opcode);
-    // R should not be incremented twice:
+    // Any other FD/DD opcode behaves as a non-prefixed opcode. The R
+    // increment above paid for the stray prefix fetch, so it is undone
+    // before the following instruction runs: an inner LD A,R then reads
+    // the R the instruction's own fetches produce, and an inner LD R,A
+    // leaves R = A (z80-documented section 6.1).
     z->r = (z->r & 0x80) | ((z->r - 1) & 0x7f);
+    exec_opcode(z, opcode);
   } break;
   }
 
