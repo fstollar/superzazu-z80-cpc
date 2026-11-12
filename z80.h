@@ -85,7 +85,9 @@ struct z80 {
   // NULL (the default): INTA reads 0xFF (nobody drives the bus); READ is an
   // ordinary memory read at the frozen PC through read_byte with
   // Z80_READ_OPERAND, which is what plain memory answers when no device
-  // overrides the read.
+  // overrides the read. A DD/FD run with no end never ends the
+  // acknowledge either: each follow-on prefix is another INTA cycle with
+  // pc still frozen, the same as the hardware.
   uint8_t (*im0_bus)(z80*, uint16_t pc, z80_im0_cycle_t cycle);
   void* userdata;
 

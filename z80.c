@@ -887,6 +887,14 @@ static inline void process_interrupts(z80* const z) {
   const bool ack_derived = ack_latched_derived && ack_free_phase < 4;
   const unsigned long ack_start_slot =
       ack_derived ? align_free_slot(z->t_counter + 1, ack_free_phase) : 0;
+  // A prefix chain split across steps takes no interrupt at the split
+  // boundary: the chain resumes on the next step, and only the boundary
+  // after the terminating instruction can accept. NMI stays latched in
+  // nmi_pending, INT stays pending. This covers the trailing check and a
+  // host-driven z80_check_interrupt() alike.
+  if (z->prefix_carry) {
+    return;
+  }
   // NMI is recognised at the end of every instruction, whatever the
   // interrupt flip-flops say -- so also right after EI.
   if (z->nmi_pending) {
@@ -1132,6 +1140,22 @@ void z80_step(z80* const z) {
     // (no fetch is issued on this path); the 4 T run internal.
     internal_t_states(z, 4);
     exec_opcode(z, 0x00);
+  } else if (z->prefix_carry) {
+    // Resume a chain split across steps: the carried prefix selects the
+    // index register. A further prefix starts a fresh head; otherwise the
+    // carried prefix's already-paid charge comes off before the
+    // terminating op runs, keeping the cycle count right for any hook
+    // mid-op.
+    const uint8_t carried = z->prefix_carry;
+    z->prefix_carry = 0;
+    uint16_t* const iz = (carried == 0xDD) ? &z->ix : &z->iy;
+    const uint8_t following = fetchb(z);
+    if (following == 0xDD || following == 0xFD) {
+      exec_opcode(z, following);
+    } else {
+      if (cyc_table_now(z)) z->cyc -= z->timing->cyc_ddfd[carried];
+      exec_opcode_ddfd(z, following, iz);
+    }
   } else {
     const uint8_t opcode = fetchb(z); // M1 opcode fetch
     exec_opcode(z, opcode);
@@ -1201,6 +1225,38 @@ void z80_gen_nmi(z80* const z) {
 void z80_gen_int(z80* const z, uint8_t data) {
   z->int_pending = 1;
   z->int_data = data;
+}
+
+// Runs a DD/FD prefix chain iteratively: following is the byte after the
+// chain head, head_iz the index register the head selected. Every further
+// prefix costs one fetch with its own R increment, and the running index
+// follows the last prefix. A chain that wraps all 64 KiB of memory (memory
+// path only) ends the step instead: the extra charge pays the head's fetch,
+// the last prefix is carried into prefix_carry, and the next step resumes.
+// Over the IM 0 bus pc is frozen so no wrap can be detected; the loop is
+// unbounded there, the same as the hardware.
+static void exec_ddfd_chain(z80* const z, uint8_t following,
+    uint16_t* const head_iz) {
+  uint16_t* iz = head_iz;
+  unsigned long prefixes = 1; // fetched so far, including the head
+  while (following == 0xDD || following == 0xFD) {
+    if (cyc_table_now(z)) z->cyc += z->timing->cyc_ddfd[following];
+    inc_r(z);
+    q_clear(z);
+    iz = (following == 0xDD) ? &z->ix : &z->iy;
+    if (++prefixes == 65536 && !z->im0_active) {
+      // Full wrap: every address held a prefix, so the run provably never
+      // ends. The extra charge pays the head's fetch (cyc_00 of a prefix
+      // is 0); the resume step takes it off again before running the
+      // terminating op, keeping split chains cycle-identical to unbroken
+      // ones.
+      if (cyc_table_now(z)) z->cyc += z->timing->cyc_ddfd[following];
+      z->prefix_carry = following;
+      return;
+    }
+    following = fetchb(z);
+  }
+  exec_opcode_ddfd(z, following, iz);
 }
 
 // executes a non-prefixed opcode
@@ -1689,8 +1745,8 @@ void exec_opcode(z80* const z, uint8_t opcode) {
 
   case 0xCB: q_clear(z); exec_opcode_cb(z, fetchb(z)); break; // M1 prefix byte
   case 0xED: q_clear(z); exec_opcode_ed(z, fetchb(z)); break; // M1 prefix byte
-  case 0xDD: q_clear(z); exec_opcode_ddfd(z, fetchb(z), &z->ix); break; // M1 prefix byte
-  case 0xFD: q_clear(z); exec_opcode_ddfd(z, fetchb(z), &z->iy); break; // M1 prefix byte
+  case 0xDD: q_clear(z); exec_ddfd_chain(z, fetchb(z), &z->ix); break; // M1 prefix byte
+  case 0xFD: q_clear(z); exec_ddfd_chain(z, fetchb(z), &z->iy); break; // M1 prefix byte
 
   default: fprintf(stderr, "unknown opcode %02X\n", opcode); break;
   }
