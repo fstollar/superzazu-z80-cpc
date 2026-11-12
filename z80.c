@@ -2363,7 +2363,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     z->mem_ptr = get_hl(z) + 1;
   } break; // rld
 
-  default: fprintf(stderr, "unknown ED opcode: %02X\n", opcode); break;
+  default: break; // undefined ED opcode: acts as a two-byte NOP
   }
 }
 

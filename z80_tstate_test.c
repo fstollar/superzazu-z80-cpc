@@ -30,7 +30,10 @@
  * harness works; it proves nothing about the T counter or the start-T
  * field, which stay unchecked until the flag is off.
  */
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 
 #include "z80.h"
@@ -852,6 +855,71 @@ static void ack_cases(void) {
   ack_case("im2", ACK_IM2, 0x5678, im2_rows, 6);
 }
 
+/* Undefined ED opcodes run as two-byte NOPs under the CPC table: 2 us
+   (z->cyc counts table units, here microseconds), PC + 2, R + 2 (two M1
+   fetches), registers and flags untouched, and nothing printed. */
+static void undefined_ed_case(uint8_t op) {
+  char label[32];
+  snprintf(label, sizeof(label), "undefined ed %02X", op);
+  z80 z;
+  set_base(&z);
+  z.timing = &z80_timing_cpc;
+  z.a = 0x12;
+  z.cf = 1;
+  z.zf = 1;
+  z.r = 0x7F;
+  uint8_t code[2] = {0xED, op};
+  load_bytes(code, 2);
+  z80 before = z;
+  const char *tmp_dir = getenv("TMPDIR");
+  char err_path[512];
+  snprintf(err_path, sizeof(err_path), "%s/z80_tstate_err_XXXXXX", tmp_dir ? tmp_dir : "/tmp");
+  int err_fd = mkstemp(err_path);
+  if (err_fd < 0) {
+    printf("FAIL %s: cannot create a temporary file for stderr\n", label);
+    ++failures;
+    return;
+  }
+  unlink(err_path);
+  int saved_err = dup(STDERR_FILENO);
+  fflush(stderr);
+  dup2(err_fd, STDERR_FILENO);
+  unsigned long cyc_before_step = z.cyc;
+  z80_step(&z);
+  fflush(stderr);
+  dup2(saved_err, STDERR_FILENO);
+  close(saved_err);
+  off_t printed = lseek(err_fd, 0, SEEK_END);
+  close(err_fd);
+  if (z.cyc - cyc_before_step != 2) {
+    printf("FAIL %s: cost is %lu us, want 2\n", label, z.cyc - cyc_before_step);
+    ++failures;
+  }
+  check_pc(label, &z, 0x1002);
+  if ((z.r & 0x7F) != ((before.r + 2) & 0x7F) || (z.r & 0x80) != (before.r & 0x80)) {
+    printf("FAIL %s: R is %02X, want %02X\n", label, z.r, (before.r & 0x80) | ((before.r + 2) & 0x7F));
+    ++failures;
+  }
+  if (z.a != before.a || z.b != before.b || z.c != before.c || z.d != before.d ||
+      z.e != before.e || z.h != before.h || z.l != before.l || z.sp != before.sp ||
+      z.ix != before.ix || z.iy != before.iy || z.i != before.i ||
+      z.cf != before.cf || z.zf != before.zf || z.sf != before.sf ||
+      z.hf != before.hf || z.pf != before.pf || z.nf != before.nf ||
+      z.xf != before.xf || z.yf != before.yf) {
+    printf("FAIL %s: a register or flag changed\n", label);
+    ++failures;
+  }
+  if (printed != 0) {
+    printf("FAIL %s: %ld bytes written to stderr, want none\n", label, (long)printed);
+    ++failures;
+  }
+}
+
+static void undefined_ed_cases(void) {
+  undefined_ed_case(0x00);
+  undefined_ed_case(0xFF);
+}
+
 int main(void) {
   sweep_base();
   sweep_cb();
@@ -867,6 +935,7 @@ int main(void) {
   ix_d_read_cases();
   im0_prefix_cases();
   cpc_table_cases();
+  undefined_ed_cases();
   ack_cases();
   if (failures == 0)
     printf("tstate: all cases pass\n");
