@@ -727,7 +727,8 @@ static int check_full_chain(void) {
 // 65536 prefixes (65536 µs = 262144 T), wraps pc back to the start, keeps
 // R (65536 mod 128 = 0), takes no interrupt, and carries the last prefix
 // into the next step.
-static int check_split_chain(const char* name, bool mixed, bool by_host) {
+static int check_split_chain(const char* name, bool mixed, bool by_host,
+    uint8_t r_seed) {
   z80 z;
   init_chain_cpu(&z);
   if (mixed) {
@@ -742,7 +743,7 @@ static int check_split_chain(const char* name, bool mixed, bool by_host) {
   z.iff2 = 1;
   z80_gen_int(&z, 0xFF);
   z80_gen_nmi(&z);
-  z.r = 0x10;
+  z.r = r_seed;
   z.int_check_by_host = by_host;
   const unsigned long cyc0 = z.cyc;
   const unsigned long t0 = z.t_counter;
@@ -752,13 +753,34 @@ static int check_split_chain(const char* name, bool mixed, bool by_host) {
   }
   const uint8_t carry = mixed ? 0xFD : 0xDD;
   if (z.pc != 0 || z.cyc - cyc0 != 65536 || z.t_counter - t0 != 262144UL ||
-      z.r != 0x10 || z.sp != 0xF000 || !z.iff1 || !z.iff2 ||
+      z.r != r_seed || z.sp != 0xF000 || !z.iff1 || !z.iff2 ||
       !z.int_pending || !z.nmi_pending || z.prefix_carry != carry) {
     printf("*** ERROR %s: pc %04X cyc %lu t %lu r %02X sp %04X iff %d%d"
-        " int %d nmi %d carry %02X (expected 0000 +65536 +262144 10 F000"
+        " int %d nmi %d carry %02X (expected 0000 +65536 +262144 %02X F000"
         " 11 11 %02X)\n",
         name, z.pc, z.cyc - cyc0, z.t_counter - t0, z.r, z.sp, z.iff1,
-        z.iff2, z.int_pending, z.nmi_pending, z.prefix_carry, carry);
+        z.iff2, z.int_pending, z.nmi_pending, z.prefix_carry, r_seed, carry);
+    return 1;
+  }
+  // A second chunk straight into the carried prefix: the resume step meets
+  // another prefix, so it is a full chain again -- the same 65536 µs, T and
+  // R as the first, the carry set to the chunk's last prefix, nothing
+  // taken. (A resume that took the carried charge off here would be one µs
+  // short.)
+  const unsigned long cyc1 = z.cyc;
+  const unsigned long t1 = z.t_counter;
+  z80_step(&z);
+  if (by_host) {
+    z80_check_interrupt(&z);
+  }
+  if (z.pc != 0 || z.cyc - cyc1 != 65536 || z.t_counter - t1 != 262144UL ||
+      z.r != r_seed || z.sp != 0xF000 || !z.iff1 || !z.iff2 ||
+      !z.int_pending || !z.nmi_pending || z.prefix_carry != carry) {
+    printf("*** ERROR %s, second chunk: pc %04X cyc %lu t %lu r %02X"
+        " sp %04X iff %d%d int %d nmi %d carry %02X (expected 0000 +65536"
+        " +262144 %02X F000 11 11 %02X)\n",
+        name, z.pc, z.cyc - cyc1, z.t_counter - t1, z.r, z.sp, z.iff1,
+        z.iff2, z.int_pending, z.nmi_pending, z.prefix_carry, r_seed, carry);
     return 1;
   }
   return 0;
@@ -774,6 +796,7 @@ static int check_resume_clean(void) {
   for (unsigned i = 0; i < MEMORY_SIZE; i++) {
     memory[i] = (i & 1) ? 0xFD : 0xDD;
   }
+  z.r = 0x85;
   z80_step(&z); // splits with the last prefix (FD) carried
   if (z.prefix_carry != 0xFD || z.pc != 0) {
     printf("*** ERROR %s: no split (carry %02X pc %04X)\n", name,
@@ -786,14 +809,100 @@ static int check_resume_clean(void) {
   const unsigned long cyc0 = z.cyc;
   z80_step(&z);
   if (z.iy != 0x1234 || z.ix != 0 || z.h != 0 || z.l != 0 || z.pc != 3 ||
-      z.cyc - cyc0 != 3 || z.q != 0 || z.prefix_carry != 0) {
+      z.cyc - cyc0 != 3 || z.q != 0 || z.prefix_carry != 0 ||
+      z.r != 0x86) {
     printf("*** ERROR %s: ix %04X iy %04X hl %02X%02X pc %04X cyc %lu"
-        " q %02X carry %02X (expected 0000 1234 0000 0003 +3 00 00)\n",
+        " q %02X carry %02X r %02X (expected 0000 1234 0000 0003 +3 00 00"
+        " 86)\n",
         name, z.ix, z.iy, z.h, z.l, z.pc, z.cyc - cyc0, z.q,
-        z.prefix_carry);
+        z.prefix_carry, z.r);
     return 1;
   }
   return 0;
+}
+
+// Resuming onto the default path: the byte after the carried prefix is an
+// ordinary op, with a DD prefix in front of it. The resumed step must equal
+// a fresh "DD op" step in every result, minus the prefix fetch the split
+// already paid: 1 µs, 4 T and one R increment less. `bytes` are the
+// op bytes placed at 0 (resumed) / after a DD at 0xFFFF (fresh).
+static unsigned packed_flags(const z80* const z) {
+  return (z->sf << 7) | (z->zf << 6) | (z->yf << 5) | (z->hf << 4) |
+         (z->xf << 3) | (z->pf << 2) | (z->nf << 1) | z->cf;
+}
+
+static int check_resume_default(const char* name, const uint8_t* bytes,
+    unsigned count, uint8_t expect_a, uint8_t expect_ix_mem,
+    uint8_t resumed_r_incs) {
+  z80 fresh;
+  init_chain_cpu(&fresh);
+  memory[0xFFFF] = 0xDD;
+  memcpy(memory, bytes, count);
+  memory[0x4005] = 0x81; // the (IX+5) operand of the CB form
+  fresh.pc = 0xFFFF;
+  fresh.a = 0x01;
+  fresh.ix = 0x4000;
+  fresh.r = 0x85;
+  const unsigned long fresh_cyc0 = fresh.cyc;
+  const unsigned long fresh_t0 = fresh.t_counter;
+  z80_step(&fresh);
+  const unsigned long fresh_cyc = fresh.cyc - fresh_cyc0;
+  const unsigned long fresh_t = fresh.t_counter - fresh_t0;
+  const uint8_t fresh_mem = memory[0x4005];
+
+  z80 resumed;
+  init_chain_cpu(&resumed);
+  memset(memory, 0xDD, MEMORY_SIZE);
+  resumed.ix = 0x4000;
+  resumed.a = 0x01;
+  z80_step(&resumed); // splits with DD carried
+  if (resumed.prefix_carry != 0xDD || resumed.pc != 0) {
+    printf("*** ERROR %s: no split (carry %02X pc %04X)\n", name,
+        resumed.prefix_carry, resumed.pc);
+    return 1;
+  }
+  memset(memory, 0, MEMORY_SIZE);
+  memcpy(memory, bytes, count);
+  memory[0x4005] = 0x81;
+  resumed.r = 0x85;
+  const unsigned long cyc0 = resumed.cyc;
+  const unsigned long t0 = resumed.t_counter;
+  z80_step(&resumed);
+  const unsigned long cyc = resumed.cyc - cyc0;
+  const unsigned long t = resumed.t_counter - t0;
+  if (resumed.pc != count || fresh.pc != count || resumed.a != expect_a ||
+      fresh.a != expect_a || memory[0x4005] != expect_ix_mem ||
+      fresh_mem != expect_ix_mem || packed_flags(&resumed) != packed_flags(&fresh) ||
+      resumed.ix != fresh.ix || resumed.iy != fresh.iy ||
+      resumed.mem_ptr != fresh.mem_ptr || resumed.q != fresh.q ||
+      resumed.prefix_carry != 0 || fresh_cyc != cyc + 1 ||
+      fresh_t != t + 4 || fresh.r != 0x85 + resumed_r_incs + 1 ||
+      resumed.r != 0x85 + resumed_r_incs) {
+    printf("*** ERROR %s: pc %04X/%04X a %02X/%02X f %02X/%02X mem %02X/%02X"
+        " memptr %04X/%04X q %02X/%02X carry %02X cyc %lu/%lu t %lu/%lu"
+        " r %02X/%02X (resumed/fresh; expected pc %04X a %02X mem %02X,"
+        " fresh = resumed +1 µs +4 T +1 R, resumed R 85 + %u)\n",
+        name, resumed.pc, fresh.pc, resumed.a, fresh.a, packed_flags(&resumed),
+        packed_flags(&fresh),
+        memory[0x4005], fresh_mem, resumed.mem_ptr, fresh.mem_ptr, resumed.q,
+        fresh.q, resumed.prefix_carry, cyc, fresh_cyc, t, fresh_t, resumed.r,
+        fresh.r, count, expect_a, expect_ix_mem, resumed_r_incs);
+    return 1;
+  }
+  return 0;
+}
+
+static int check_resume_default_paths(void) {
+  static const uint8_t nop[] = {0x00};
+  static const uint8_t neg[] = {0xED, 0x44};        // A = 1 -> FF
+  static const uint8_t rlc_ix[] = {0xCB, 0x05, 0x06}; // RLC (IX+5): 81 -> 03
+  int r = 0;
+  r += check_resume_default("resume onto DD NOP", nop, sizeof nop, 0x01, 0x81, 1);
+  r += check_resume_default("resume onto DD ED NEG", neg, sizeof neg, 0xFF,
+      0x81, 2);
+  r += check_resume_default("resume onto DD CB RLC (IX+5)", rlc_ix,
+      sizeof rlc_ix, 0x01, 0x03, 1);
+  return r;
 }
 
 // No interrupt is taken at the split boundary itself; at the next real
@@ -925,11 +1034,16 @@ static int run_chain_split_test(void) {
     return 1;
   }
   int r = 0;
-  r += check_split_chain("all-dd prefixes", false, false);
-  r += check_split_chain("all-dd prefixes, host check", false, true);
-  r += check_split_chain("mixed prefixes", true, false);
-  r += check_split_chain("mixed prefixes, host check", true, true);
+  r += check_split_chain("all-dd prefixes", false, false, 0x10);
+  r += check_split_chain("all-dd prefixes, host check", false, true, 0x10);
+  r += check_split_chain("mixed prefixes", true, false, 0x10);
+  r += check_split_chain("mixed prefixes, host check", true, true, 0x10);
+  // R bit 7 (set by LD R,A) survives the 65536 increments of the low 7 bits.
+  r += check_split_chain("all-dd prefixes, R bit 7", false, false, 0x85);
+  r += check_split_chain("mixed prefixes, R bit 7, host check", true, true,
+      0x85);
   r += check_resume_clean();
+  r += check_resume_default_paths();
   r += check_resume_nmi();
   printf("*** split prefix chain test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);

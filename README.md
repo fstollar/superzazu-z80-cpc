@@ -27,6 +27,8 @@ This fork also changed `port_in`/`port_out` to receive the real 16-bit port addr
 
 The fork also adds an `im0_bus(z80*, pc, z80_im0_cycle_t)` callback that supplies the bytes an IM 0 instruction reads after its first: `Z80_IM0_INTA` for each further opcode byte (after a CB/ED/DD/FD prefix) and `Z80_IM0_READ` for operand bytes. PC is frozen at its pre-interrupt value for the whole IM 0 instruction. With `im0_bus` left `NULL`, an INTA cycle reads 0xFF and a READ is a plain memory read at the frozen PC.
 
+A step may end in the middle of an instruction: a DD/FD prefix chain that runs through all 64 KiB of memory (every address holds a prefix, so it can never end) stops the step after 65536 prefixes, 65536 µs on the CPC table, with `prefix_carry` set to the last prefix. The next `z80_step()` resumes that chain instead of fetching a new instruction, and no interrupt is accepted in between; the host regains control every 65536 prefixes instead of never. A host that writes `pc` for a CPU that may be in this state must also clear `prefix_carry`.
+
 Regenerate `z80_timing_cpc.c` after editing `docs/z80-cpc-timing.md` or
 `tools/gen_timing_cpc.py` with `python3 tools/gen_timing_cpc.py`, then
 `python3 tools/verify_cpc_timing.py` before committing.
@@ -185,6 +187,19 @@ ld (<ix,iy>+1),a..............  OK
 ld (<bc,de>),a................  OK
 Tests complete
 *** 5764169747 instructions executed on 46734978649 cycles (expected=46734978649, diff=0)
+
+*** outi port test: OK
+*** ini memptr test: OK
+*** memptr test: OK
+*** ei delay test: OK
+*** reti iff test: OK
+*** stray prefix R test: OK
+*** long prefix chain test: OK
+*** full prefix chain test: OK
+*** split prefix chain test: OK
+*** im0 prefix chain test: OK
+*** q latch test: OK
+*** cyc source test: OK
 ```
 
 A second test, `z80_tstate_test.c`, checks bus-cycle timing: for every
