@@ -1022,6 +1022,7 @@ void z80_init(z80* const z) {
   z->int_check_by_host = false;
   z->im0_bus = NULL;
   z->im0_active = 0;
+  z->prefix_carry = 0;
   z->userdata = NULL;
 
   z->cyc = 0;

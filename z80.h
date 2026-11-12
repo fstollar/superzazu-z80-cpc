@@ -176,6 +176,12 @@ struct z80 {
   // which latches Q for an IM0 acknowledge run there the same way.
   // Clear (the default): z80_step() checks at once, as before.
   bool int_check_by_host;
+  // A DD/FD prefix chain that wrapped all 64 KiB of memory: the step
+  // ended after 65536 prefixes with this set to the last prefix (0xDD or
+  // 0xFD), and the next step resumes the chain instead of fetching a new
+  // instruction. 0 while no chain is split across steps; cleared by
+  // z80_init. No interrupt is accepted while it is set.
+  uint8_t prefix_carry;
 };
 
 // One /IORQ or /WR strobe window of the running bus cycle, in half-T

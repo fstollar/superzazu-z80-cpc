@@ -654,6 +654,299 @@ static int run_stray_r_test(void) {
   return r != 0;
 }
 
+// MARK: long DD/FD prefix chains
+// A run of DD/FD prefixes runs iteratively inside one step: each prefix
+// is one 1 µs fetch with its own R increment, and a chain that wraps all
+// 64 KiB of memory ends the step instead (the memory is provably all
+// prefixes then) and resumes on the next step, with no interrupt accepted
+// in between. All cycle counts below use the CPC table so the µs numbers
+// read directly.
+static void init_chain_cpu(z80* const z) {
+  z80_init(z);
+  z->read_byte = rb;
+  z->write_byte = wb;
+  z->port_in = in;
+  z->port_out = out;
+  z80_set_timing(z, &z80_timing_cpc);
+  memset(memory, 0, MEMORY_SIZE); // NOPs everywhere
+  z->pc = 0;
+  z->sp = 0xF000;
+}
+
+// 1000 mixed DD/FD prefixes and LD IX/IY,nn run as one step: pc past the
+// whole chain, the index register of the last prefix, one µs per prefix
+// plus the 4 µs of LD iz,nn, one R increment per fetch, MEMPTR untouched.
+static int check_long_chain(void) {
+  const char* name = "1000 mixed prefixes";
+  z80 z;
+  init_chain_cpu(&z);
+  for (int i = 0; i < 1000; i++) {
+    memory[i] = (i & 1) ? 0xFD : 0xDD; // the last prefix is FD
+  }
+  memory[1000] = 0x21; // ld iz,**
+  memory[1001] = 0x34;
+  memory[1002] = 0x12;
+  z.r = 0xFF;
+  const unsigned long cyc0 = z.cyc;
+  z80_step(&z);
+  if (z.pc != 1003 || z.iy != 0x1234 || z.ix != 0 || z.cyc - cyc0 != 1003 ||
+      z.r != 0xE8 || z.mem_ptr != 0 || z.prefix_carry != 0) {
+    printf("*** ERROR %s: pc %04X ix %04X iy %04X cyc %lu r %02X memptr %04X"
+        " carry %02X (expected 03EB 0000 1234 +1003 E8 0000 00)\n",
+        name, z.pc, z.ix, z.iy, z.cyc - cyc0, z.r, z.mem_ptr,
+        z.prefix_carry);
+    return 1;
+  }
+  return 0;
+}
+
+// 65535 DD prefixes and a NOP fill the whole 64 KiB: still one step with
+// no split, one µs per prefix plus the NOP's own (65535 + 1). The NOP's own
+// base µs rides on top of its prefix charge on the default path, the same
+// as without any prefix run-up.
+static int check_full_chain(void) {
+  const char* name = "65535 prefixes";
+  z80 z;
+  init_chain_cpu(&z);
+  memset(memory, 0xDD, 65535);
+  memory[65535] = 0x00; // nop
+  z.r = 0x10;
+  const unsigned long cyc0 = z.cyc;
+  z80_step(&z);
+  if (z.pc != 0 || z.cyc - cyc0 != 65536 || z.r != 0x10 ||
+      z.prefix_carry != 0) {
+    printf("*** ERROR %s: pc %04X cyc %lu r %02X carry %02X"
+        " (expected 0000 +65536 10 00)\n",
+        name, z.pc, z.cyc - cyc0, z.r, z.prefix_carry);
+    return 1;
+  }
+  return 0;
+}
+
+// A memory made only of prefixes never ends on its own: one step fetches
+// 65536 prefixes (65536 µs = 262144 T), wraps pc back to the start, keeps
+// R (65536 mod 128 = 0), takes no interrupt, and carries the last prefix
+// into the next step.
+static int check_split_chain(const char* name, bool mixed, bool by_host) {
+  z80 z;
+  init_chain_cpu(&z);
+  if (mixed) {
+    for (unsigned i = 0; i < MEMORY_SIZE; i++) {
+      memory[i] = (i & 1) ? 0xFD : 0xDD; // the last byte (odd) is FD
+    }
+  } else {
+    memset(memory, 0xDD, MEMORY_SIZE);
+  }
+  z.interrupt_mode = 1;
+  z.iff1 = 1;
+  z.iff2 = 1;
+  z80_gen_int(&z, 0xFF);
+  z80_gen_nmi(&z);
+  z.r = 0x10;
+  z.int_check_by_host = by_host;
+  const unsigned long cyc0 = z.cyc;
+  const unsigned long t0 = z.t_counter;
+  z80_step(&z);
+  if (by_host) {
+    z80_check_interrupt(&z);
+  }
+  const uint8_t carry = mixed ? 0xFD : 0xDD;
+  if (z.pc != 0 || z.cyc - cyc0 != 65536 || z.t_counter - t0 != 262144UL ||
+      z.r != 0x10 || z.sp != 0xF000 || !z.iff1 || !z.iff2 ||
+      !z.int_pending || !z.nmi_pending || z.prefix_carry != carry) {
+    printf("*** ERROR %s: pc %04X cyc %lu t %lu r %02X sp %04X iff %d%d"
+        " int %d nmi %d carry %02X (expected 0000 +65536 +262144 10 F000"
+        " 11 11 %02X)\n",
+        name, z.pc, z.cyc - cyc0, z.t_counter - t0, z.r, z.sp, z.iff1,
+        z.iff2, z.int_pending, z.nmi_pending, z.prefix_carry, carry);
+    return 1;
+  }
+  return 0;
+}
+
+// Resuming a split chain whose next byte ends it: the carried prefix
+// selects the index register (FD -> IY, not HL or IX) and its already-paid
+// µs comes off, so LD IY,nn costs 3 µs (4 - 1 carried).
+static int check_resume_clean(void) {
+  const char* name = "resume split chain";
+  z80 z;
+  init_chain_cpu(&z);
+  for (unsigned i = 0; i < MEMORY_SIZE; i++) {
+    memory[i] = (i & 1) ? 0xFD : 0xDD;
+  }
+  z80_step(&z); // splits with the last prefix (FD) carried
+  if (z.prefix_carry != 0xFD || z.pc != 0) {
+    printf("*** ERROR %s: no split (carry %02X pc %04X)\n", name,
+        z.prefix_carry, z.pc);
+    return 1;
+  }
+  memory[0] = 0x21; // ld iz,**
+  memory[1] = 0x34;
+  memory[2] = 0x12;
+  const unsigned long cyc0 = z.cyc;
+  z80_step(&z);
+  if (z.iy != 0x1234 || z.ix != 0 || z.h != 0 || z.l != 0 || z.pc != 3 ||
+      z.cyc - cyc0 != 3 || z.q != 0 || z.prefix_carry != 0) {
+    printf("*** ERROR %s: ix %04X iy %04X hl %02X%02X pc %04X cyc %lu"
+        " q %02X carry %02X (expected 0000 1234 0000 0003 +3 00 00)\n",
+        name, z.ix, z.iy, z.h, z.l, z.pc, z.cyc - cyc0, z.q,
+        z.prefix_carry);
+    return 1;
+  }
+  return 0;
+}
+
+// No interrupt is taken at the split boundary itself; at the next real
+// boundary the pending NMI is taken before the pending INT.
+static int check_resume_nmi(void) {
+  const char* name = "nmi after split chain";
+  z80 z;
+  init_chain_cpu(&z);
+  for (unsigned i = 0; i < MEMORY_SIZE; i++) {
+    memory[i] = (i & 1) ? 0xFD : 0xDD;
+  }
+  z.interrupt_mode = 1;
+  z.iff1 = 1;
+  z.iff2 = 1;
+  z80_gen_int(&z, 0xFF);
+  z80_gen_nmi(&z);
+  z80_step(&z); // split: nothing taken
+  if (z.pc != 0 || z.sp != 0xF000 || !z.int_pending || !z.nmi_pending ||
+      z.prefix_carry != 0xFD) {
+    printf("*** ERROR %s: taken at the split (pc %04X sp %04X int %d"
+        " nmi %d carry %02X)\n",
+        name, z.pc, z.sp, z.int_pending, z.nmi_pending, z.prefix_carry);
+    return 1;
+  }
+  memory[0] = 0x21; // ld iz,**
+  memory[1] = 0x34;
+  memory[2] = 0x12;
+  z80_step(&z); // LD IY,nn, then the NMI is acknowledged
+  if (z.pc != 0x0066 || pushed_return(&z) != 0x0003 || z.nmi_pending ||
+      !z.int_pending || z.iff1 || z.iy != 0x1234) {
+    printf("*** ERROR %s: pc %04X return %04X nmi %d int %d iff1 %d"
+        " iy %04X (expected 0066 0003 0 1 0 1234)\n",
+        name, z.pc, pushed_return(&z), z.nmi_pending, z.int_pending,
+        z.iff1, z.iy);
+    return 1;
+  }
+  return 0;
+}
+
+// IM 0 follow-on bytes after a prefix arrive over the acknowledge bus with
+// pc frozen: a long DD run there is iterative too, with no wrap bound. The
+// step runs the NOP at 0 first (pc to 1, R +1 with the seed below), then
+// the acknowledge runs the 1000-prefix chain off the frozen pc.
+static unsigned im0_intas;
+static int im0_prefixes_left;
+static int im0_reads;
+static int im0_acks;
+
+static uint8_t im0_chain_bus(z80* const bus_z, uint16_t bus_pc,
+    z80_im0_cycle_t cycle) {
+  (void)bus_z;
+  (void)bus_pc;
+  if (cycle == Z80_IM0_INTA) {
+    im0_intas++;
+    if (im0_prefixes_left > 0) {
+      im0_prefixes_left--;
+      return 0xDD;
+    }
+    return 0x21; // ld iz,**
+  }
+  im0_reads++;
+  if (im0_reads == 1) {
+    return 0x34;
+  }
+  if (im0_reads == 2) {
+    return 0x12;
+  }
+  return 0x00;
+}
+
+static void im0_count_ack(z80* const ack_z) {
+  (void)ack_z;
+  im0_acks++;
+}
+
+static int check_im0_chain(void) {
+  const char* name = "im0 prefix chain";
+  z80 z;
+  init_chain_cpu(&z);
+  z.interrupt_mode = 0;
+  z.iff1 = 1;
+  z.iff2 = 1;
+  z.im0_bus = im0_chain_bus;
+  z.int_ack = im0_count_ack;
+  im0_intas = 0;
+  im0_prefixes_left = 999; // with int_data below: 1000 prefixes
+  im0_reads = 0;
+  im0_acks = 0;
+  z.r = 0x10;
+  z80_gen_int(&z, 0xDD); // first prefix byte
+  z80_step(&z);
+  // R: seed 10h + 1 (the NOP) + 1001 (chain head, 999 bus prefixes, LD iz,nn).
+  if (z.ix != 0x1234 || z.iy != 0 || z.r != 0x7A || im0_intas != 1000 ||
+      im0_acks != 1 || z.pc != 1 || z.im0_active != 0 || z.int_pending) {
+    printf("*** ERROR %s: ix %04X iy %04X r %02X intas %u acks %d pc %04X"
+        " active %d pending %d (expected 1234 0000 7A 1000 1 0001 0 0)\n",
+        name, z.ix, z.iy, z.r, im0_intas, im0_acks, z.pc, z.im0_active,
+        z.int_pending);
+    return 1;
+  }
+  return 0;
+}
+
+static int run_chain_long_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  const int r = check_long_chain();
+  printf("*** long prefix chain test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
+static int run_chain_full_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  const int r = check_full_chain();
+  printf("*** full prefix chain test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
+static int run_chain_split_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  r += check_split_chain("all-dd prefixes", false, false);
+  r += check_split_chain("all-dd prefixes, host check", false, true);
+  r += check_split_chain("mixed prefixes", true, false);
+  r += check_split_chain("mixed prefixes, host check", true, true);
+  r += check_resume_clean();
+  r += check_resume_nmi();
+  printf("*** split prefix chain test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
+static int run_chain_im0_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  const int r = check_im0_chain();
+  printf("*** im0 prefix chain test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: Q latch
 // The core keeps an 8-bit Q latch behind SCF/CCF's undocumented X/Y
 // flags: after an instruction that wrote the flags Q holds F, otherwise
@@ -2238,6 +2531,18 @@ int main(int argc, char** argv) {
   if (argc > 1 && strcmp(argv[1], "strayr") == 0) {
     return run_stray_r_test();
   }
+  if (argc > 1 && strcmp(argv[1], "chainlong") == 0) {
+    return run_chain_long_test();
+  }
+  if (argc > 1 && strcmp(argv[1], "chainfull") == 0) {
+    return run_chain_full_test();
+  }
+  if (argc > 1 && strcmp(argv[1], "chainsplit") == 0) {
+    return run_chain_split_test();
+  }
+  if (argc > 1 && strcmp(argv[1], "chainim0") == 0) {
+    return run_chain_im0_test();
+  }
   if (argc > 1 && strcmp(argv[1], "qlatch") == 0) {
     return run_qlatch_test();
   }
@@ -2293,6 +2598,10 @@ int main(int argc, char** argv) {
     r += run_ei_delay_test();
     r += run_reti_iff_test();
     r += run_stray_r_test();
+    r += run_chain_long_test();
+    r += run_chain_full_test();
+    r += run_chain_split_test();
+    r += run_chain_im0_test();
     r += run_qlatch_test();
     r += run_cyc_source_test();
   }
