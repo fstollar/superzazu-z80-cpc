@@ -12,10 +12,12 @@ Array stretches each bus-touching M-cycle to the next 1us boundary; see
 `docs/z80-cpc-timing.md` for the full table and its sourcing).
 
 One scalar value (INT acknowledge in interrupt mode 0 -- see
-`tools/gen_timing_cpc.py`'s `CPC_US` dict) has no fixed CPC-specific
-measurement available -- its cost genuinely depends on the instruction
-the interrupting device puts on the bus -- and falls back to the
-generic-Z80 value, clearly tagged `UNRESOLVED` in `z80_timing_cpc.c`.
+`tools/gen_timing_cpc.py`'s `CPC_US` dict) applies on the timing-table
+source only: on the WAIT-sampled-slots source an IM 0 acknowledge costs
+its sampled span, like NMI, IM 1 and IM 2. Its cost genuinely depends on
+the instruction the interrupting device puts on the bus, so it falls back
+to the generic-Z80 value, clearly tagged `UNRESOLVED` in
+`z80_timing_cpc.c`.
 Every other timing value, including the instructions that used to be
 ambiguous between two conflicting published sources, and the interrupt-
 acknowledge figures for NMI/IM1/IM2 (corrected against cpctech's own
