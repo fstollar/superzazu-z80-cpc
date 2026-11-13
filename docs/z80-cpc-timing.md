@@ -187,14 +187,19 @@ instruction ends up on a genuinely hot path.
 ## Other timings
 
 - Interrupt-acknowledge → first instruction of the ISR: **IM 1: 5 µs;
-  IM 2: 7 µs; NMI: 4 µs**. IM 0: the fetched
-  instruction's own cost + 1 µs (an IM 0 RST: 5 µs, same as IM 1 — Young
-  ch.5 gives 13 T for both); each further
-  INTA-style M1 after a prefix (CB/ED/DD/FD) is modelled as adding 1 µs
-  more. That per-extra-INTA 1 µs is derived from the Z80's 2 wait states
-  per INTA cycle (Zilog UM0080; redcode/Z80), not measured: it is
-  unverified on a CPC, where nothing drives the bus in IM 0, and the ACCC
-  has no IM 0 material.
+  IM 2: 7 µs; NMI: 4 µs**. IM 0 is charged from the WAIT-sampled slots
+  like IM 1/IM 2, from the slot the next opcode fetch would have sampled
+  to the slot after the injected instruction's last bus cycle: an IM 0
+  RST costs what IM 1 costs (5 µs, 4 µs after a 4-class instruction --
+  Young ch.5 gives 13 T for both, UM0080 p.19 "two more than the normal
+  number"). An injected CALL nn costs 6 µs (5 µs after a 4-class
+  instruction); a further INTA after a prefix is one more bus cycle in
+  the span. On the table source the old rule stays (the fetched
+  instruction's own cost + 1 µs, +1 µs per further INTA). The per-extra-
+  INTA 1 µs is derived from the Z80's 2 wait states per INTA cycle
+  (Zilog UM0080; redcode/Z80), not measured: it is unverified on a CPC,
+  where nothing drives the bus in IM 0, and the ACCC has no IM 0
+  material.
   - Corrected 2026-10-11 per ACCC v1.9 §27.4/§27.5 p.281 (and §25.3): an
     interrupt's call to #38 lasts 5 µs vs 4 µs for RST #38 called by
     code; the IM 2 call through the table lasts 7 µs. The ACCC outranks

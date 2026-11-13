@@ -62,18 +62,18 @@ static unsigned long first_free_slot(unsigned long stamp, unsigned long mask) {
 // Whether this step derives cyc from the WAIT-sampled slots: the source
 // selects it and the mask leaves exactly one phase free. Evaluated once at
 // z80_step entry and latched in cyc_derived_step below; the charge sites
-// read the latch (OR im0_active) so every site agrees with the step's own
-// span even if a callback changes the mask or source mid-step.
+// read the latch so every site agrees with the step's own span even if a
+// callback changes the mask or source mid-step.
 static inline bool cyc_derived_now(const z80* const z) {
   return z->cyc_source == Z80_CYC_FROM_WAIT_SLOTS && wait_free_phase(z->periodic_wait_mask) < 4;
 }
 
 // Whether this site keeps its timing-table charge: always in the table
-// source, and for the instruction injected by an IM 0 acknowledge, which
-// runs off the bus and keeps the table. Reads the step-entry latch, so a
-// mask or source change inside the step cannot split its charges.
+// source. Reads the step-entry latch, so a mask or source change inside
+// the step cannot split its charges; an accepted acknowledge relatches it
+// to its own decision below.
 static inline bool cyc_table_now(const z80* const z) {
-  return !z->cyc_derived_step || z->im0_active;
+  return !z->cyc_derived_step;
 }
 
 // Interrupt-acknowledge M1: six T with two automatic waits, sampled at the
@@ -205,10 +205,11 @@ static inline uint16_t nextw(z80* const z) {
 static inline uint8_t fetchb(z80* const z) {
   if (z->im0_active) {
     // IM 0: a follow-on opcode byte after a prefix is another full INTA
-    // cycle -- no PC increment. It runs no host memory callback, but its
-    // acknowledge still takes the whole INTA count.
+    // cycle -- no PC increment. It runs no host memory callback; on the
+    // table source it still adds the acknowledge overhead, on the
+    // sampled-slots source the span below covers it.
     inta(z);
-    z->cyc += z->timing->int_ack_im0;
+    if (cyc_table_now(z)) z->cyc += z->timing->int_ack_im0;
     return z->im0_bus ? z->im0_bus(z, z->pc, Z80_IM0_INTA) : 0xFF;
   }
   z->bus_cycle_start = z->t_counter;
@@ -871,14 +872,15 @@ static inline uint16_t displace(
 }
 
 static inline void process_interrupts(z80* const z) {
-  // An NMI/IM1/IM2 acknowledge is charged like a step, from the slot the
-  // next opcode fetch would have sampled to the slot after the
-  // acknowledge. The start slot is recorded up front so the end charge
-  // below spans the whole acknowledge. Both ends use the free phase read
-  // from the live mask here, at acknowledge entry, not the phase the step
-  // latched, so a callback that changed the mask during the step moves
-  // the acknowledge with it. IM 0 keeps the table, its instruction runs
-  // off the bus.
+  // An acknowledge is charged like a step, from the slot the next opcode
+  // fetch would have sampled to the slot after the acknowledge. The start
+  // slot is recorded up front so the end charge below spans the whole
+  // acknowledge, IM 0's injected instruction included. Both ends use the
+  // free phase read from the live mask here, at acknowledge entry, not
+  // the phase the step latched, so a callback that changed the mask
+  // during the step moves the acknowledge with it. Each accepted
+  // acknowledge relatches the step latch to its own decision, so a mask
+  // with no single free phase sends the whole acknowledge to the table.
   const bool ack_latched_derived = !cyc_table_now(z);
   const unsigned ack_free_phase =
       ack_latched_derived ? wait_free_phase(z->periodic_wait_mask) : 0;
@@ -898,6 +900,7 @@ static inline void process_interrupts(z80* const z) {
   // NMI is recognised at the end of every instruction, whatever the
   // interrupt flip-flops say -- so also right after EI.
   if (z->nmi_pending) {
+    z->cyc_derived_step = ack_derived;
     z->nmi_pending = 0;
     z->halted = 0;
     z->iff1 = 0;
@@ -929,6 +932,7 @@ static inline void process_interrupts(z80* const z) {
   }
 
   if (z->int_pending && z->iff1) {
+    z->cyc_derived_step = ack_derived;
     z->int_pending = 0;
     z->halted = 0;
     z->iff1 = 0;
@@ -945,12 +949,14 @@ static inline void process_interrupts(z80* const z) {
       // once per M1 by exec_opcode and the prefix handlers.
       //
       // The INTA cycle and the off-bus bytes run with no host memory
-      // callback; the INTA cycle runs the acknowledge hook below. The
-      // instruction body then accounts for the rest.
+      // callback; the INTA cycle runs the acknowledge hook below. On the
+      // sampled-slots source the span below covers the whole acknowledge,
+      // injected instruction included.
       inta(z);
       if (z->int_ack)
         z->int_ack(z);
-      z->cyc += z->timing->int_ack_im0;
+      if (!ack_derived)
+        z->cyc += z->timing->int_ack_im0;
       z->im0_active = 1;
       q_clear(z);
       exec_opcode(z, z->int_data);
@@ -959,6 +965,9 @@ static inline void process_interrupts(z80* const z) {
       // a host-driven check would leave the pre-step latch behind while
       // the in-step check leaves the instruction's flags.
       z->q = z->flags_written ? get_f(z) : 0;
+      if (ack_derived)
+        z->cyc += (align_free_slot(z->t_counter + 1, ack_free_phase) -
+            ack_start_slot) / 4;
       break;
 
     case 1:
@@ -1163,8 +1172,7 @@ void z80_step(z80* const z) {
 
   // The derived instruction charge lands before the INT sample point and
   // any acknowledge, so acknowledges see before + instruction as with the
-  // table, while NMI/IM1/IM2 acknowledges are charged from their own
-  // sampled slots; IM 0 keeps the table.
+  // table, while every acknowledge is charged from its own sampled slots.
   if (derived_now)
     z->cyc += (align_free_slot(z->t_counter + 1, free_phase) - start_slot) / 4;
 

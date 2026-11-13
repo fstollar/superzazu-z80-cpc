@@ -51,8 +51,8 @@ typedef enum {
 // conditional costs as the instruction runs. FROM_WAIT_SLOTS charges once
 // per step, at the end of the instruction, as the number of 4-T periods
 // from the step's M1 sample slot to the next one; the per-opcode and
-// conditional table charges are skipped, while NMI/IM1/IM2 acknowledges
-// are charged from their own sampled slots; IM 0 keeps the table. The
+// conditional table charges are skipped, while every acknowledge,
+// including IM 0, is charged from its own sampled slots. The
 // mode applies to a step only when the WAIT mask leaves exactly one phase
 // free; otherwise the step falls back to the table.
 typedef enum {
@@ -101,9 +101,10 @@ struct z80 {
   uint8_t cyc_derived_step; // internal: latched at z80_step entry: whether
                             // this step derives the cycle count from the
                             // WAIT-sampled slots. The charge sites read the
-                            // latch, OR im0_active, so a mask or source
-                            // change inside a step cannot split one step's
-                            // charges across the two modes.
+                            // latch, so a mask or source change inside a
+                            // step cannot split one step's charges across
+                            // the two modes. An accepted acknowledge
+                            // relatches it to its own decision.
 
   unsigned long t_counter; // T-state counter: every bus cycle and every
                            // internal stretch advances it. Without a WAIT
@@ -171,7 +172,8 @@ struct z80 {
   bool iff1 : 1, iff2 : 1;
   bool halted : 1;
   bool int_pending : 1, nmi_pending : 1;
-  uint8_t im0_active; // internal: set while an IM 0 instruction runs off the bus
+  uint8_t im0_active; // internal: set while an IM 0 instruction runs off the bus;
+                      // bus routing only, no charge decision reads it
   // When set, z80_step() skips its trailing interrupt check after recording
   // int_sample_point (its Q latch still runs first): the host brings its INT
   // and NMI inputs up to that T and then calls z80_check_interrupt() itself,
