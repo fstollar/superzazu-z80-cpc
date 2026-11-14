@@ -112,7 +112,10 @@ static int check_out_port(const char* name, uint8_t opcode, uint16_t bc,
   z.b = (uint8_t)(bc >> 8);
   z.c = (uint8_t)(bc & 0xFF);
   out_count = 0;
-  z80_step(&z);
+  // The ED prefix is its own step; run to the end of the instruction.
+  do {
+    z80_step(&z);
+  } while (z.pending_prefix != Z80_PREFIX_NONE);
   int failed = 0;
   if (out_count != 1 || last_out_port != expected_port ||
       last_out_val != 0x5A) {
@@ -169,7 +172,10 @@ static int check_in_memptr(const char* name, uint8_t opcode, uint16_t bc,
   z.l = 0x00;
   z.b = (uint8_t)(bc >> 8);
   z.c = (uint8_t)(bc & 0xFF);
-  z80_step(&z);
+  // The ED prefix is its own step; run to the end of the instruction.
+  do {
+    z80_step(&z);
+  } while (z.pending_prefix != Z80_PREFIX_NONE);
   if (z.mem_ptr != expected_memptr) {
     printf("*** ERROR %s: MEMPTR %04X (expected %04X)\n", name, z.mem_ptr,
         expected_memptr);
@@ -224,7 +230,12 @@ static int check_memptr(const char* name, const uint8_t* code, int len,
   z.l = (uint8_t)(hl & 0xFF);
   z.ix = ix;
   z.mem_ptr = 0x1234;
-  z80_step(&z);
+  // Prefix bytes are their own steps; run to the end of the instruction.
+  // (Repeat cases rewind the pc and finish in the same opcode step, so the
+  // loop ends with pending NONE there too.)
+  do {
+    z80_step(&z);
+  } while (z.pending_prefix != Z80_PREFIX_NONE);
   if (z.mem_ptr != expected_memptr) {
     printf("*** ERROR %s: MEMPTR %04X (expected %04X)\n", name, z.mem_ptr,
         expected_memptr);
@@ -482,9 +493,9 @@ static int check_ei_halt(void) {
   return expect_taken(name, &z, 0x0002);
 }
 
-// DD FB is one instruction that acts as EI: no interrupt between the prefix
-// and FB (z80-documented section 5.5, "including the prefixed ones"), and the
-// hold-off covers the instruction after it, as for a plain EI.
+// DD FB acts as EI, one prefix step at a time: no interrupt between the
+// prefix and FB (z80-documented section 5.5, "including the prefixed ones"),
+// and the hold-off covers the instruction after it, as for a plain EI.
 static int check_prefixed_ei(void) {
   const char* name = "dd fb";
   z80 z;
@@ -492,7 +503,12 @@ static int check_prefixed_ei(void) {
   memory[0x0000] = 0xDD;
   memory[0x0001] = 0xFB; // ei
   z80_gen_int(&z, 0xFF);
-  z80_step(&z);
+  z80_step(&z); // DD prefix step: the interrupt stays held
+  z80_check_interrupt(&z);
+  if (expect_held(name, "after the DD step", &z, 0x0001)) {
+    return 1;
+  }
+  z80_step(&z); // FB step: EI sets the hold-off
   z80_check_interrupt(&z);
   if (expect_held(name, "after DD FB", &z, 0x0002)) {
     return 1;
@@ -518,8 +534,9 @@ static int check_retn_pending(const char* name, bool iff2) {
   memory[0xF001] = 0x12;
   z.iff1 = 0;
   z.iff2 = iff2;
+  z80_step(&z); // ED prefix step
   z80_gen_int(&z, 0xFF);
-  z80_step(&z);
+  z80_step(&z); // RETN itself
   if (iff2) {
     return expect_taken(name, &z, 0x1234);
   }
@@ -560,7 +577,8 @@ static int check_reti_iff(const char* name, uint8_t opcode) {
   memory[0xF001] = 0x12;
   z.iff1 = 0;
   z.iff2 = 1;
-  z80_step(&z);
+  z80_step(&z); // ED prefix step
+  z80_step(&z); // RETI/RETN itself
   if (z.pc != 0x1234 || !z.iff1 || !z.iff2) {
     printf("*** ERROR %s: pc %04X iff1 %d iff2 %d (expected 1234 1 1)\n",
         name, z.pc, z.iff1, z.iff2);
@@ -583,13 +601,11 @@ static int run_reti_iff_test(void) {
 }
 
 // MARK: stray DD/FD prefix and R
-// A stray DD/FD prefix costs one R increment of its own, like every M1
-// fetch, and the instruction after it runs with the R its own fetches
-// produce: LD A,R behind one stray prefix reads R0 + 3 (prefix, ED, ED
-// op) and behind two R0 + 4; LD R,A leaves R = A in both cases. The R
-// undo for the stray prefix runs before the following instruction, so an
-// inner LD A,R / LD R,A never sees the not-yet-undone increment
-// (z80-documented section 6.1).
+// Every prefix byte is its own step with its own R increment, so a stray
+// DD/FD prefix keeps its increment even though the next prefix drops it:
+// LD A,R behind one stray prefix reads R0 + 3 (DD, ED, ED op) and behind
+// two R0 + 4; LD R,A leaves R = A in both cases (z80-documented
+// section 6.1).
 static void init_stray_r_cpu(z80* const z) {
   z80_init(z);
   z->read_byte = rb;
@@ -613,7 +629,9 @@ static int check_ld_a_r_after_stray(const char* name, int strays,
   }
   memory[strays] = 0xED;
   memory[strays + 1] = 0x5F; // ld a,r
-  z80_step(&z);
+  for (int i = 0; i < strays + 2; i++) {
+    z80_step(&z);
+  }
   if (z.a != exp_a || z.r != exp_r || z.pc != (uint16_t)(strays + 2)) {
     printf("*** ERROR %s: a %02X r %02X pc %04X (expected %02X %02X %04X)\n",
         name, z.a, z.r, z.pc, exp_a, exp_r, strays + 2);
@@ -630,7 +648,9 @@ static int check_ld_r_a_after_stray(const char* name, int strays) {
   }
   memory[strays] = 0xED;
   memory[strays + 1] = 0x4F; // ld r,a
-  z80_step(&z);
+  for (int i = 0; i < strays + 2; i++) {
+    z80_step(&z);
+  }
   if (z.r != 0x50 || z.a != 0x50 || z.pc != (uint16_t)(strays + 2)) {
     printf("*** ERROR %s: a %02X r %02X pc %04X (expected 50 50 %04X)\n",
         name, z.a, z.r, z.pc, strays + 2);
@@ -655,12 +675,11 @@ static int run_stray_r_test(void) {
 }
 
 // MARK: long DD/FD prefix chains
-// A run of DD/FD prefixes runs iteratively inside one step: each prefix
-// is one 1 µs fetch with its own R increment, and a chain that wraps all
-// 64 KiB of memory ends the step instead (the memory is provably all
-// prefixes then) and resumes on the next step, with no interrupt accepted
-// in between. All cycle counts below use the CPC table so the µs numbers
-// read directly.
+// A run of DD/FD prefixes runs one step per byte: each prefix is its own
+// 1 µs fetch with its own R increment, and every step between the first
+// prefix and the opcode carries the pending prefix with no interrupt
+// accepted in between. All cycle counts below use the CPC table so the µs
+// numbers read directly.
 static void init_chain_cpu(z80* const z) {
   z80_init(z);
   z->read_byte = rb;
@@ -673,9 +692,10 @@ static void init_chain_cpu(z80* const z) {
   z->sp = 0xF000;
 }
 
-// 1000 mixed DD/FD prefixes and LD IX/IY,nn run as one step: pc past the
-// whole chain, the index register of the last prefix, one µs per prefix
-// plus the 4 µs of LD iz,nn, one R increment per fetch, MEMPTR untouched.
+// 1000 mixed DD/FD prefixes and LD IX/IY,nn run one step per byte: pc past
+// the whole chain, the index register of the last prefix, one µs per prefix
+// plus the 3 µs of the LD step (its 4 µs table charge minus the prefix µs),
+// one R increment per fetch, MEMPTR untouched.
 static int check_long_chain(void) {
   const char* name = "1000 mixed prefixes";
   z80 z;
@@ -688,264 +708,26 @@ static int check_long_chain(void) {
   memory[1002] = 0x12;
   z.r = 0xFF;
   const unsigned long cyc0 = z.cyc;
-  z80_step(&z);
-  if (z.pc != 1003 || z.iy != 0x1234 || z.ix != 0 || z.cyc - cyc0 != 1003 ||
-      z.r != 0xE8 || z.mem_ptr != 0 || z.prefix_carry != 0) {
-    printf("*** ERROR %s: pc %04X ix %04X iy %04X cyc %lu r %02X memptr %04X"
-        " carry %02X (expected 03EB 0000 1234 +1003 E8 0000 00)\n",
-        name, z.pc, z.ix, z.iy, z.cyc - cyc0, z.r, z.mem_ptr,
-        z.prefix_carry);
-    return 1;
-  }
-  return 0;
-}
-
-// 65535 DD prefixes and a NOP fill the whole 64 KiB: still one step with
-// no split, one µs per prefix plus the NOP's own (65535 + 1). The NOP's own
-// base µs rides on top of its prefix charge on the default path, the same
-// as without any prefix run-up.
-static int check_full_chain(void) {
-  const char* name = "65535 prefixes";
-  z80 z;
-  init_chain_cpu(&z);
-  memset(memory, 0xDD, 65535);
-  memory[65535] = 0x00; // nop
-  z.r = 0x10;
-  const unsigned long cyc0 = z.cyc;
-  z80_step(&z);
-  if (z.pc != 0 || z.cyc - cyc0 != 65536 || z.r != 0x10 ||
-      z.prefix_carry != 0) {
-    printf("*** ERROR %s: pc %04X cyc %lu r %02X carry %02X"
-        " (expected 0000 +65536 10 00)\n",
-        name, z.pc, z.cyc - cyc0, z.r, z.prefix_carry);
-    return 1;
-  }
-  return 0;
-}
-
-// A memory made only of prefixes never ends on its own: one step fetches
-// 65536 prefixes (65536 µs = 262144 T), wraps pc back to the start, keeps
-// R (65536 mod 128 = 0), takes no interrupt, and carries the last prefix
-// into the next step.
-static int check_split_chain(const char* name, bool mixed, bool by_host,
-    uint8_t r_seed) {
-  z80 z;
-  init_chain_cpu(&z);
-  if (mixed) {
-    for (unsigned i = 0; i < MEMORY_SIZE; i++) {
-      memory[i] = (i & 1) ? 0xFD : 0xDD; // the last byte (odd) is FD
-    }
-  } else {
-    memset(memory, 0xDD, MEMORY_SIZE);
-  }
-  z.interrupt_mode = 1;
-  z.iff1 = 1;
-  z.iff2 = 1;
-  z80_gen_int(&z, 0xFF);
-  z80_gen_nmi(&z);
-  z.r = r_seed;
-  z.int_check_by_host = by_host;
-  const unsigned long cyc0 = z.cyc;
-  const unsigned long t0 = z.t_counter;
-  z80_step(&z);
-  if (by_host) {
-    z80_check_interrupt(&z);
-  }
-  const uint8_t carry = mixed ? 0xFD : 0xDD;
-  if (z.pc != 0 || z.cyc - cyc0 != 65536 || z.t_counter - t0 != 262144UL ||
-      z.r != r_seed || z.sp != 0xF000 || !z.iff1 || !z.iff2 ||
-      !z.int_pending || !z.nmi_pending || z.prefix_carry != carry) {
-    printf("*** ERROR %s: pc %04X cyc %lu t %lu r %02X sp %04X iff %d%d"
-        " int %d nmi %d carry %02X (expected 0000 +65536 +262144 %02X F000"
-        " 11 11 %02X)\n",
-        name, z.pc, z.cyc - cyc0, z.t_counter - t0, z.r, z.sp, z.iff1,
-        z.iff2, z.int_pending, z.nmi_pending, z.prefix_carry, r_seed, carry);
-    return 1;
-  }
-  // A second chunk straight into the carried prefix: the resume step meets
-  // another prefix, so it is a full chain again -- the same 65536 µs, T and
-  // R as the first, the carry set to the chunk's last prefix, nothing
-  // taken. (A resume that took the carried charge off here would be one µs
-  // short.)
-  const unsigned long cyc1 = z.cyc;
-  const unsigned long t1 = z.t_counter;
-  z80_step(&z);
-  if (by_host) {
-    z80_check_interrupt(&z);
-  }
-  if (z.pc != 0 || z.cyc - cyc1 != 65536 || z.t_counter - t1 != 262144UL ||
-      z.r != r_seed || z.sp != 0xF000 || !z.iff1 || !z.iff2 ||
-      !z.int_pending || !z.nmi_pending || z.prefix_carry != carry) {
-    printf("*** ERROR %s, second chunk: pc %04X cyc %lu t %lu r %02X"
-        " sp %04X iff %d%d int %d nmi %d carry %02X (expected 0000 +65536"
-        " +262144 %02X F000 11 11 %02X)\n",
-        name, z.pc, z.cyc - cyc1, z.t_counter - t1, z.r, z.sp, z.iff1,
-        z.iff2, z.int_pending, z.nmi_pending, z.prefix_carry, r_seed, carry);
-    return 1;
-  }
-  return 0;
-}
-
-// Resuming a split chain whose next byte ends it: the carried prefix
-// selects the index register (FD -> IY, not HL or IX) and its already-paid
-// µs comes off, so LD IY,nn costs 3 µs (4 - 1 carried).
-static int check_resume_clean(void) {
-  const char* name = "resume split chain";
-  z80 z;
-  init_chain_cpu(&z);
-  for (unsigned i = 0; i < MEMORY_SIZE; i++) {
-    memory[i] = (i & 1) ? 0xFD : 0xDD;
-  }
-  z.r = 0x85;
-  z80_step(&z); // splits with the last prefix (FD) carried
-  if (z.prefix_carry != 0xFD || z.pc != 0) {
-    printf("*** ERROR %s: no split (carry %02X pc %04X)\n", name,
-        z.prefix_carry, z.pc);
-    return 1;
-  }
-  memory[0] = 0x21; // ld iz,**
-  memory[1] = 0x34;
-  memory[2] = 0x12;
-  const unsigned long cyc0 = z.cyc;
-  z80_step(&z);
-  if (z.iy != 0x1234 || z.ix != 0 || z.h != 0 || z.l != 0 || z.pc != 3 ||
-      z.cyc - cyc0 != 3 || z.q != 0 || z.prefix_carry != 0 ||
-      z.r != 0x86) {
-    printf("*** ERROR %s: ix %04X iy %04X hl %02X%02X pc %04X cyc %lu"
-        " q %02X carry %02X r %02X (expected 0000 1234 0000 0003 +3 00 00"
-        " 86)\n",
-        name, z.ix, z.iy, z.h, z.l, z.pc, z.cyc - cyc0, z.q,
-        z.prefix_carry, z.r);
-    return 1;
-  }
-  return 0;
-}
-
-// Resuming onto the default path: the byte after the carried prefix is an
-// ordinary op, with a DD prefix in front of it. The resumed step must equal
-// a fresh "DD op" step in every result, minus the prefix fetch the split
-// already paid: 1 µs, 4 T and one R increment less. `bytes` are the
-// op bytes placed at 0 (resumed) / after a DD at 0xFFFF (fresh).
-static unsigned packed_flags(const z80* const z) {
-  return (z->sf << 7) | (z->zf << 6) | (z->yf << 5) | (z->hf << 4) |
-         (z->xf << 3) | (z->pf << 2) | (z->nf << 1) | z->cf;
-}
-
-static int check_resume_default(const char* name, const uint8_t* bytes,
-    unsigned count, uint8_t expect_a, uint8_t expect_ix_mem,
-    uint8_t resumed_r_incs) {
-  z80 fresh;
-  init_chain_cpu(&fresh);
-  memory[0xFFFF] = 0xDD;
-  memcpy(memory, bytes, count);
-  memory[0x4005] = 0x81; // the (IX+5) operand of the CB form
-  fresh.pc = 0xFFFF;
-  fresh.a = 0x01;
-  fresh.ix = 0x4000;
-  fresh.r = 0x85;
-  const unsigned long fresh_cyc0 = fresh.cyc;
-  const unsigned long fresh_t0 = fresh.t_counter;
-  z80_step(&fresh);
-  const unsigned long fresh_cyc = fresh.cyc - fresh_cyc0;
-  const unsigned long fresh_t = fresh.t_counter - fresh_t0;
-  const uint8_t fresh_mem = memory[0x4005];
-
-  z80 resumed;
-  init_chain_cpu(&resumed);
-  memset(memory, 0xDD, MEMORY_SIZE);
-  resumed.ix = 0x4000;
-  resumed.a = 0x01;
-  z80_step(&resumed); // splits with DD carried
-  if (resumed.prefix_carry != 0xDD || resumed.pc != 0) {
-    printf("*** ERROR %s: no split (carry %02X pc %04X)\n", name,
-        resumed.prefix_carry, resumed.pc);
-    return 1;
-  }
-  memset(memory, 0, MEMORY_SIZE);
-  memcpy(memory, bytes, count);
-  memory[0x4005] = 0x81;
-  resumed.r = 0x85;
-  const unsigned long cyc0 = resumed.cyc;
-  const unsigned long t0 = resumed.t_counter;
-  z80_step(&resumed);
-  const unsigned long cyc = resumed.cyc - cyc0;
-  const unsigned long t = resumed.t_counter - t0;
-  if (resumed.pc != count || fresh.pc != count || resumed.a != expect_a ||
-      fresh.a != expect_a || memory[0x4005] != expect_ix_mem ||
-      fresh_mem != expect_ix_mem || packed_flags(&resumed) != packed_flags(&fresh) ||
-      resumed.ix != fresh.ix || resumed.iy != fresh.iy ||
-      resumed.mem_ptr != fresh.mem_ptr || resumed.q != fresh.q ||
-      resumed.prefix_carry != 0 || fresh_cyc != cyc + 1 ||
-      fresh_t != t + 4 || fresh.r != 0x85 + resumed_r_incs + 1 ||
-      resumed.r != 0x85 + resumed_r_incs) {
-    printf("*** ERROR %s: pc %04X/%04X a %02X/%02X f %02X/%02X mem %02X/%02X"
-        " memptr %04X/%04X q %02X/%02X carry %02X cyc %lu/%lu t %lu/%lu"
-        " r %02X/%02X (resumed/fresh; expected pc %04X a %02X mem %02X,"
-        " fresh = resumed +1 µs +4 T +1 R, resumed R 85 + %u)\n",
-        name, resumed.pc, fresh.pc, resumed.a, fresh.a, packed_flags(&resumed),
-        packed_flags(&fresh),
-        memory[0x4005], fresh_mem, resumed.mem_ptr, fresh.mem_ptr, resumed.q,
-        fresh.q, resumed.prefix_carry, cyc, fresh_cyc, t, fresh_t, resumed.r,
-        fresh.r, count, expect_a, expect_ix_mem, resumed_r_incs);
-    return 1;
-  }
-  return 0;
-}
-
-static int check_resume_default_paths(void) {
-  static const uint8_t nop[] = {0x00};
-  static const uint8_t neg[] = {0xED, 0x44};        // A = 1 -> FF
-  static const uint8_t rlc_ix[] = {0xCB, 0x05, 0x06}; // RLC (IX+5): 81 -> 03
-  int r = 0;
-  r += check_resume_default("resume onto DD NOP", nop, sizeof nop, 0x01, 0x81, 1);
-  r += check_resume_default("resume onto DD ED NEG", neg, sizeof neg, 0xFF,
-      0x81, 2);
-  r += check_resume_default("resume onto DD CB RLC (IX+5)", rlc_ix,
-      sizeof rlc_ix, 0x01, 0x03, 1);
-  return r;
-}
-
-// No interrupt is taken at the split boundary itself; at the next real
-// boundary the pending NMI is taken before the pending INT.
-static int check_resume_nmi(void) {
-  const char* name = "nmi after split chain";
-  z80 z;
-  init_chain_cpu(&z);
-  for (unsigned i = 0; i < MEMORY_SIZE; i++) {
-    memory[i] = (i & 1) ? 0xFD : 0xDD;
-  }
-  z.interrupt_mode = 1;
-  z.iff1 = 1;
-  z.iff2 = 1;
-  z80_gen_int(&z, 0xFF);
-  z80_gen_nmi(&z);
-  z80_step(&z); // split: nothing taken
-  if (z.pc != 0 || z.sp != 0xF000 || !z.int_pending || !z.nmi_pending ||
-      z.prefix_carry != 0xFD) {
-    printf("*** ERROR %s: taken at the split (pc %04X sp %04X int %d"
-        " nmi %d carry %02X)\n",
-        name, z.pc, z.sp, z.int_pending, z.nmi_pending, z.prefix_carry);
-    return 1;
-  }
-  memory[0] = 0x21; // ld iz,**
-  memory[1] = 0x34;
-  memory[2] = 0x12;
-  z80_step(&z); // LD IY,nn, then the NMI is acknowledged
-  if (z.pc != 0x0066 || pushed_return(&z) != 0x0003 || z.nmi_pending ||
-      !z.int_pending || z.iff1 || z.iy != 0x1234) {
-    printf("*** ERROR %s: pc %04X return %04X nmi %d int %d iff1 %d"
-        " iy %04X (expected 0066 0003 0 1 0 1234)\n",
-        name, z.pc, pushed_return(&z), z.nmi_pending, z.int_pending,
-        z.iff1, z.iy);
+  int steps = 0;
+  do {
+    z80_step(&z);
+    steps += 1;
+  } while (z.pending_prefix != Z80_PREFIX_NONE && steps < 2000);
+  if (steps != 1001 || z.pc != 1003 || z.iy != 0x1234 || z.ix != 0 ||
+      z.cyc - cyc0 != 1003 || z.r != 0xE8 || z.mem_ptr != 0) {
+    printf("*** ERROR %s: steps %d pc %04X ix %04X iy %04X cyc %lu r %02X"
+        " memptr %04X (expected 1001 03EB 0000 1234 +1003 E8 0000)\n",
+        name, steps, z.pc, z.ix, z.iy, z.cyc - cyc0, z.r, z.mem_ptr);
     return 1;
   }
   return 0;
 }
 
 // IM 0 follow-on bytes after a prefix arrive over the acknowledge bus with
-// pc frozen: a long DD run there is iterative too, with no wrap bound. The
-// step runs the NOP at 0 first (pc to 1, R +1 with the seed below), then
-// the acknowledge runs the 1000-prefix chain off the frozen pc.
+// pc frozen: each bus byte is its own step, with no wrap bound. The first
+// step runs the NOP at 0 (pc to 1), then the acknowledge takes the first
+// prefix byte off int_data; each follow-on step fetches one byte over INTA
+// until LD iz,nn ends the instruction.
 static unsigned im0_intas;
 static int im0_prefixes_left;
 static int im0_reads;
@@ -993,14 +775,24 @@ static int check_im0_chain(void) {
   im0_acks = 0;
   z.r = 0x10;
   z80_gen_int(&z, 0xDD); // first prefix byte
-  z80_step(&z);
-  // R: seed 10h + 1 (the NOP) + 1001 (chain head, 999 bus prefixes, LD iz,nn).
-  if (z.ix != 0x1234 || z.iy != 0 || z.r != 0x7A || im0_intas != 1000 ||
-      im0_acks != 1 || z.pc != 1 || z.im0_active != 0 || z.int_pending) {
-    printf("*** ERROR %s: ix %04X iy %04X r %02X intas %u acks %d pc %04X"
-        " active %d pending %d (expected 1234 0000 7A 1000 1 0001 0 0)\n",
-        name, z.ix, z.iy, z.r, im0_intas, im0_acks, z.pc, z.im0_active,
-        z.int_pending);
+  const unsigned long cyc0 = z.cyc;
+  int steps = 0;
+  do {
+    z80_step(&z);
+    steps += 1;
+  } while (z.pending_prefix != Z80_PREFIX_NONE && steps < 2000);
+  // R: seed 10h + 1 (the NOP) + 1 (the acknowledge prefix) + 999 (bus
+  // prefixes) + 1 (LD iz,nn). cyc: 3 for the first step (NOP + acknowledge
+  // + prefix), 2 per bus prefix step (INTA fetch + prefix), 4 for the last
+  // (INTA fetch + LD iz,nn minus the prefix µs).
+  if (steps != 1001 || z.ix != 0x1234 || z.iy != 0 || z.r != 0x7A ||
+      im0_intas != 1000 || im0_acks != 1 || z.pc != 1 ||
+      z.cyc - cyc0 != 2005 || z.im0_active != 0 || z.int_pending) {
+    printf("*** ERROR %s: steps %d ix %04X iy %04X r %02X intas %u acks %d"
+        " pc %04X cyc %lu active %d pending %d"
+        " (expected 1001 1234 0000 7A 1000 1 0001 +2005 0 0)\n",
+        name, steps, z.ix, z.iy, z.r, im0_intas, im0_acks, z.pc,
+        z.cyc - cyc0, z.im0_active, z.int_pending);
     return 1;
   }
   return 0;
@@ -1017,39 +809,6 @@ static int run_chain_long_test(void) {
   return r != 0;
 }
 
-static int run_chain_full_test(void) {
-  memory = malloc(MEMORY_SIZE);
-  if (memory == NULL) {
-    return 1;
-  }
-  const int r = check_full_chain();
-  printf("*** full prefix chain test: %s\n", r == 0 ? "OK" : "FAILED");
-  free(memory);
-  return r != 0;
-}
-
-static int run_chain_split_test(void) {
-  memory = malloc(MEMORY_SIZE);
-  if (memory == NULL) {
-    return 1;
-  }
-  int r = 0;
-  r += check_split_chain("all-dd prefixes", false, false, 0x10);
-  r += check_split_chain("all-dd prefixes, host check", false, true, 0x10);
-  r += check_split_chain("mixed prefixes", true, false, 0x10);
-  r += check_split_chain("mixed prefixes, host check", true, true, 0x10);
-  // R bit 7 (set by LD R,A) survives the 65536 increments of the low 7 bits.
-  r += check_split_chain("all-dd prefixes, R bit 7", false, false, 0x85);
-  r += check_split_chain("mixed prefixes, R bit 7, host check", true, true,
-      0x85);
-  r += check_resume_clean();
-  r += check_resume_default_paths();
-  r += check_resume_nmi();
-  printf("*** split prefix chain test: %s\n", r == 0 ? "OK" : "FAILED");
-  free(memory);
-  return r != 0;
-}
-
 static int run_chain_im0_test(void) {
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
@@ -1057,6 +816,626 @@ static int run_chain_im0_test(void) {
   }
   const int r = check_im0_chain();
   printf("*** im0 prefix chain test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
+// MARK: every prefix is its own step
+// Each CB/ED/DD/FD prefix byte is one z80_step(): one M1 fetch, R + 1 and
+// 1 us on the CPC table. The next step decodes the following byte by the
+// pending prefix. No INT or NMI is accepted after a prefix; EI holds off
+// INT only (NMI still goes through). All cycle counts below use the CPC
+// table so the us numbers read directly.
+static void init_prefix_cpu(z80* const z) {
+  z80_init(z);
+  z->read_byte = rb;
+  z->write_byte = wb;
+  z->port_in = in;
+  z->port_out = out;
+  z80_set_timing(z, &z80_timing_cpc);
+  memset(memory, 0, MEMORY_SIZE); // NOPs everywhere
+  z->pc = 0;
+  z->sp = 0xF000;
+  z->r = 0x10;
+}
+
+// No interrupt after a prefix exactly when a prefix is pending.
+static int check_accept_matches_prefix(const char* name, const char* where,
+    const z80* const z) {
+  const int pending = z->pending_prefix != Z80_PREFIX_NONE;
+  const int none = z->int_accept == Z80_ACCEPT_NONE;
+  if (pending != none) {
+    printf("*** ERROR %s %s: pending %02X accept %u"
+        " (NONE exactly while a prefix is pending)\n",
+        name, where, z->pending_prefix, z->int_accept);
+    return 1;
+  }
+  return 0;
+}
+
+// T1, one prefix: DD 21 34 12 costs 1 + 3 us, R + 1 per step.
+static int check_prefix_single(void) {
+  const char* name = "single DD prefix";
+  z80 z;
+  init_prefix_cpu(&z);
+  memory[0x0000] = 0xDD;
+  memory[0x0001] = 0x21; // ld ix,**
+  memory[0x0002] = 0x34;
+  memory[0x0003] = 0x12;
+  int r = 0;
+  z80_step(&z);
+  if (z.pc != 1 || z.pending_prefix != Z80_PREFIX_DD ||
+      z.int_accept != Z80_ACCEPT_NONE || z.cyc != 1 || z.r != 0x11 ||
+      z.ix != 0) {
+    printf("*** ERROR %s after the prefix: pc %04X pending %02X accept %u"
+        " cyc %lu r %02X ix %04X (expected 0001 DD NONE 1 11 0000)\n",
+        name, z.pc, z.pending_prefix, z.int_accept, z.cyc, z.r, z.ix);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the prefix", &z);
+  z80_step(&z);
+  if (z.pc != 4 || z.pending_prefix != Z80_PREFIX_NONE ||
+      z.int_accept != Z80_ACCEPT_ALL || z.cyc != 4 || z.r != 0x12 ||
+      z.ix != 0x1234) {
+    printf("*** ERROR %s after the opcode: pc %04X pending %02X accept %u"
+        " cyc %lu r %02X ix %04X (expected 0004 NONE ALL 4 12 1234)\n",
+        name, z.pc, z.pending_prefix, z.int_accept, z.cyc, z.r, z.ix);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the opcode", &z);
+  return r;
+}
+
+// T2, chain: DD FD DD 21 34 12. The last prefix wins, so IX is loaded.
+static int check_prefix_chain(void) {
+  const char* name = "DD FD DD chain";
+  z80 z;
+  init_prefix_cpu(&z);
+  memory[0x0000] = 0xDD;
+  memory[0x0001] = 0xFD;
+  memory[0x0002] = 0xDD;
+  memory[0x0003] = 0x21; // ld iz,**
+  memory[0x0004] = 0x34;
+  memory[0x0005] = 0x12;
+  static const uint8_t want_prefix[3] = {
+    Z80_PREFIX_DD, Z80_PREFIX_FD, Z80_PREFIX_DD
+  };
+  int r = 0;
+  for (int step = 0; step < 3; step++) {
+    z80_step(&z);
+    if (z.pc != (uint16_t)(step + 1) ||
+        z.pending_prefix != want_prefix[step] ||
+        z.int_accept != Z80_ACCEPT_NONE || z.cyc != (unsigned long)(step + 1) ||
+        z.r != (uint8_t)(0x11 + step)) {
+      printf("*** ERROR %s step %d: pc %04X pending %02X accept %u cyc %lu"
+          " r %02X (expected %04X %02X NONE %d %02X)\n", name, step + 1, z.pc,
+          z.pending_prefix, z.int_accept, z.cyc, z.r, step + 1,
+          want_prefix[step], step + 1, 0x11 + step);
+      r = 1;
+    }
+    r += check_accept_matches_prefix(name, "on a prefix step", &z);
+  }
+  z80_step(&z);
+  if (z.pc != 6 || z.pending_prefix != Z80_PREFIX_NONE ||
+      z.int_accept != Z80_ACCEPT_ALL || z.cyc != 6 || z.r != 0x14 ||
+      z.ix != 0x1234 || z.iy != 0) {
+    printf("*** ERROR %s after the opcode: pc %04X pending %02X accept %u"
+        " cyc %lu r %02X ix %04X iy %04X"
+        " (expected 0006 NONE ALL 6 14 1234 0000)\n",
+        name, z.pc, z.pending_prefix, z.int_accept, z.cyc, z.r, z.ix, z.iy);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the opcode", &z);
+  return r;
+}
+
+// T3, CB and ED: CB 47 costs 1 + 1; LDIR with BC = 2 costs 1 + 5 with PC
+// back, then 1 + 4.
+static int check_prefix_cb(void) {
+  const char* name = "CB prefix";
+  z80 z;
+  init_prefix_cpu(&z);
+  memory[0x0000] = 0xCB;
+  memory[0x0001] = 0x47; // bit 0,a
+  z.a = 0x01;
+  int r = 0;
+  z80_step(&z);
+  if (z.pc != 1 || z.pending_prefix != Z80_PREFIX_CB ||
+      z.int_accept != Z80_ACCEPT_NONE || z.cyc != 1 || z.r != 0x11) {
+    printf("*** ERROR %s after the prefix: pc %04X pending %02X accept %u"
+        " cyc %lu r %02X (expected 0001 CB NONE 1 11)\n",
+        name, z.pc, z.pending_prefix, z.int_accept, z.cyc, z.r);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the prefix", &z);
+  z80_step(&z);
+  if (z.pc != 2 || z.pending_prefix != Z80_PREFIX_NONE ||
+      z.int_accept != Z80_ACCEPT_ALL || z.cyc != 2 || z.r != 0x12 ||
+      z.zf != 0) {
+    printf("*** ERROR %s after the opcode: pc %04X pending %02X accept %u"
+        " cyc %lu r %02X zf %d (expected 0002 NONE ALL 2 12 0)\n",
+        name, z.pc, z.pending_prefix, z.int_accept, z.cyc, z.r, z.zf);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the opcode", &z);
+  return r;
+}
+
+static int check_prefix_ldir(void) {
+  const char* name = "ED LDIR";
+  z80 z;
+  init_prefix_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0xB0; // ldir
+  memory[0x4000] = 0xAA;
+  memory[0x4001] = 0xAA; // the second pass copies this one to 0x5001
+  z.b = 0;
+  z.c = 2;
+  z.h = 0x40;
+  z.l = 0x00;
+  z.d = 0x50;
+  z.e = 0x00;
+  int r = 0;
+  z80_step(&z); // ED prefix
+  if (z.pc != 1 || z.pending_prefix != Z80_PREFIX_ED ||
+      z.int_accept != Z80_ACCEPT_NONE || z.cyc != 1 || z.r != 0x11) {
+    printf("*** ERROR %s after the prefix: pc %04X pending %02X accept %u"
+        " cyc %lu r %02X (expected 0001 ED NONE 1 11)\n",
+        name, z.pc, z.pending_prefix, z.int_accept, z.cyc, z.r);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the prefix", &z);
+  z80_step(&z); // first pass: BC 2 -> 1, PC back
+  if (z.pc != 0 || z.pending_prefix != Z80_PREFIX_NONE ||
+      z.int_accept != Z80_ACCEPT_ALL || z.cyc != 6 || z.r != 0x12 ||
+      ((uint16_t)(z.b << 8) | z.c) != 1) {
+    printf("*** ERROR %s first pass: pc %04X pending %02X accept %u cyc %lu"
+        " r %02X bc %02X%02X (expected 0000 NONE ALL 6 12 0001)\n",
+        name, z.pc, z.pending_prefix, z.int_accept, z.cyc, z.r, z.b, z.c);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the first pass", &z);
+  z80_step(&z); // ED prefix again
+  if (z.pc != 1 || z.pending_prefix != Z80_PREFIX_ED || z.cyc != 7 ||
+      z.r != 0x13) {
+    printf("*** ERROR %s second prefix: pc %04X pending %02X cyc %lu r %02X"
+        " (expected 0001 ED 7 13)\n", name, z.pc, z.pending_prefix, z.cyc,
+        z.r);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the second prefix", &z);
+  z80_step(&z); // last pass: BC 1 -> 0, PC past
+  if (z.pc != 2 || z.pending_prefix != Z80_PREFIX_NONE || z.cyc != 11 ||
+      z.r != 0x14 || z.b != 0 || z.c != 0 || memory[0x5000] != 0xAA ||
+      memory[0x5001] != 0xAA) {
+    printf("*** ERROR %s last pass: pc %04X pending %02X cyc %lu r %02X"
+        " bc %02X%02X (expected 0002 NONE 11 14 0000)\n",
+        name, z.pc, z.pending_prefix, z.cyc, z.r, z.b, z.c);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the last pass", &z);
+  return r;
+}
+
+// T4, DDCB: DD CB 05 46 costs 1, 1, 4 with R + 1, + 1, + 0. The third step
+// reads d and op as operands and the (IX+d) byte as data, with no M1.
+static z80_read_kind_t ddcb_kinds[8];
+static int ddcb_kind_count;
+
+static uint8_t ddcb_kind_rb(void* userdata, uint16_t addr,
+    z80_read_kind_t kind) {
+  (void)userdata;
+  if (ddcb_kind_count < 8) {
+    ddcb_kinds[ddcb_kind_count++] = kind;
+  }
+  return memory[addr];
+}
+
+static int check_prefix_ddcb(void) {
+  const char* name = "DDCB step";
+  z80 z;
+  init_prefix_cpu(&z);
+  memory[0x0000] = 0xDD;
+  memory[0x0001] = 0xCB;
+  memory[0x0002] = 0x05; // d
+  memory[0x0003] = 0x46; // bit 0,(ix+5)
+  z.ix = 0x4000;
+  memory[0x4005] = 0x81;
+  int r = 0;
+  z80_step(&z);
+  if (z.pc != 1 || z.pending_prefix != Z80_PREFIX_DD || z.cyc != 1 ||
+      z.r != 0x11) {
+    printf("*** ERROR %s step 1: pc %04X pending %02X cyc %lu r %02X"
+        " (expected 0001 DD 1 11)\n", name, z.pc, z.pending_prefix, z.cyc,
+        z.r);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "step 1", &z);
+  z80_step(&z);
+  if (z.pc != 2 || z.pending_prefix != Z80_PREFIX_DDCB || z.cyc != 2 ||
+      z.r != 0x12) {
+    printf("*** ERROR %s step 2: pc %04X pending %02X cyc %lu r %02X"
+        " (expected 0002 DDCB 2 12)\n", name, z.pc, z.pending_prefix, z.cyc,
+        z.r);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "step 2", &z);
+  z.read_byte = ddcb_kind_rb;
+  ddcb_kind_count = 0;
+  z80_step(&z);
+  if (z.pc != 4 || z.pending_prefix != Z80_PREFIX_NONE || z.cyc != 6 ||
+      z.r != 0x12 || z.zf != 0) {
+    printf("*** ERROR %s step 3: pc %04X pending %02X cyc %lu r %02X zf %d"
+        " (expected 0004 NONE 6 12 0)\n", name, z.pc, z.pending_prefix,
+        z.cyc, z.r, z.zf);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "step 3", &z);
+  if (ddcb_kind_count != 3 || ddcb_kinds[0] != Z80_READ_OPERAND ||
+      ddcb_kinds[1] != Z80_READ_OPERAND || ddcb_kinds[2] != Z80_READ_DATA) {
+    printf("*** ERROR %s step 3: %d reads (expected OPERAND OPERAND DATA)\n",
+        name, ddcb_kind_count);
+    r = 1;
+  }
+  for (int i = 0; i < ddcb_kind_count; i++) {
+    if (ddcb_kinds[i] == Z80_READ_M1) {
+      printf("*** ERROR %s step 3: read %d is an M1 fetch\n", name, i);
+      r = 1;
+    }
+  }
+  return r;
+}
+
+// T5, DD ED: DD ED 6A runs ADC HL,HL on HL, leaving IX alone.
+static int check_prefix_dd_ed(void) {
+  const char* name = "DD ED ADC";
+  z80 z;
+  init_prefix_cpu(&z);
+  memory[0x0000] = 0xDD;
+  memory[0x0001] = 0xED;
+  memory[0x0002] = 0x6A; // adc hl,hl
+  z.h = 0x10;
+  z.l = 0x00;
+  z.ix = 0x4000;
+  z.cf = 0;
+  int r = 0;
+  z80_step(&z);
+  if (z.pc != 1 || z.pending_prefix != Z80_PREFIX_DD || z.cyc != 1) {
+    printf("*** ERROR %s step 1: pc %04X pending %02X cyc %lu"
+        " (expected 0001 DD 1)\n", name, z.pc, z.pending_prefix, z.cyc);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "step 1", &z);
+  z80_step(&z);
+  if (z.pc != 2 || z.pending_prefix != Z80_PREFIX_ED || z.cyc != 2 ||
+      ((uint16_t)(z.h << 8) | z.l) != 0x1000 || z.ix != 0x4000) {
+    printf("*** ERROR %s step 2: pc %04X pending %02X cyc %lu hl %02X%02X"
+        " ix %04X (expected 0002 ED 2 1000 4000)\n", name, z.pc,
+        z.pending_prefix, z.cyc, z.h, z.l, z.ix);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "step 2", &z);
+  z80_step(&z);
+  if (z.pc != 3 || z.pending_prefix != Z80_PREFIX_NONE || z.cyc != 5 ||
+      ((uint16_t)(z.h << 8) | z.l) != 0x2000 || z.ix != 0x4000) {
+    printf("*** ERROR %s step 3: pc %04X pending %02X cyc %lu hl %02X%02X"
+        " ix %04X (expected 0003 NONE 5 2000 4000)\n", name, z.pc,
+        z.pending_prefix, z.cyc, z.h, z.l, z.ix);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "step 3", &z);
+  return r;
+}
+
+// T6, ED DD: two 1 us steps, PC + 2, R + 2. The second byte runs as an
+// invalid ED op with no effect, so no prefix stays pending afterwards.
+static int check_prefix_ed_dd(void) {
+  const char* name = "ED DD";
+  z80 z;
+  init_prefix_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0xDD;
+  z.a = 0x5A;
+  z.mem_ptr = 0x1234;
+  int r = 0;
+  z80_step(&z);
+  if (z.pc != 1 || z.pending_prefix != Z80_PREFIX_ED || z.cyc != 1 ||
+      z.r != 0x11) {
+    printf("*** ERROR %s step 1: pc %04X pending %02X cyc %lu r %02X"
+        " (expected 0001 ED 1 11)\n", name, z.pc, z.pending_prefix, z.cyc,
+        z.r);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "step 1", &z);
+  z80_step(&z);
+  if (z.pc != 2 || z.pending_prefix != Z80_PREFIX_NONE || z.cyc != 2 ||
+      z.r != 0x12 || z.a != 0x5A || z.mem_ptr != 0x1234) {
+    printf("*** ERROR %s step 2: pc %04X pending %02X cyc %lu r %02X"
+        " (expected 0002 NONE 2 12)\n", name, z.pc, z.pending_prefix, z.cyc,
+        z.r);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "step 2", &z);
+  return r;
+}
+
+// T7, INT: with I set before DD 21 nn nn, nothing is taken after the
+// prefix; it is taken after the opcode, stacking 0x0004.
+static int check_prefix_int(void) {
+  const char* name = "INT across a prefix";
+  z80 z;
+  init_prefix_cpu(&z);
+  memory[0x0000] = 0xDD;
+  memory[0x0001] = 0x21; // ld ix,**
+  memory[0x0002] = 0x34;
+  memory[0x0003] = 0x12;
+  z.interrupt_mode = 1;
+  z.iff1 = 1;
+  z.iff2 = 1;
+  z80_gen_int(&z, 0xFF);
+  int r = 0;
+  z80_step(&z);
+  if (z.pc != 1 || !z.int_pending || z.sp != 0xF000) {
+    printf("*** ERROR %s after the prefix: pc %04X int %d sp %04X"
+        " (expected 0001 1 F000)\n", name, z.pc, z.int_pending, z.sp);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the prefix", &z);
+  z80_step(&z);
+  r += expect_taken(name, &z, 0x0004);
+  r += check_accept_matches_prefix(name, "after the acknowledge", &z);
+  return r;
+}
+
+// T8, NMI: the same across a prefix, stacking 0x0004 at 0x66.
+static int check_prefix_nmi(void) {
+  const char* name = "NMI across a prefix";
+  z80 z;
+  init_prefix_cpu(&z);
+  memory[0x0000] = 0xDD;
+  memory[0x0001] = 0x21; // ld ix,**
+  memory[0x0002] = 0x34;
+  memory[0x0003] = 0x12;
+  z80_gen_nmi(&z);
+  int r = 0;
+  z80_step(&z);
+  if (z.pc != 1 || !z.nmi_pending || z.sp != 0xF000) {
+    printf("*** ERROR %s after the prefix: pc %04X nmi %d sp %04X"
+        " (expected 0001 1 F000)\n", name, z.pc, z.nmi_pending, z.sp);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the prefix", &z);
+  z80_step(&z);
+  if (z.pc != 0x0066 || z.nmi_pending || pushed_return(&z) != 0x0004) {
+    printf("*** ERROR %s after the opcode: pc %04X return %04X nmi %d"
+        " (expected 0066 0004 0)\n", name, z.pc, pushed_return(&z),
+        z.nmi_pending);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the acknowledge", &z);
+  return r;
+}
+
+// T9, EI: INT waits for the instruction after EI, even across prefixes;
+// NMI goes through right after EI.
+static void init_prefix_ei_cpu(z80* const z) {
+  init_prefix_cpu(z);
+  z->interrupt_mode = 1;
+  z->iff1 = 1;
+  z->iff2 = 1;
+}
+
+static int check_prefix_ei_nop(void) {
+  const char* name = "EI NOP with INT";
+  z80 z;
+  init_prefix_ei_cpu(&z);
+  memory[0x0000] = 0xFB; // ei
+  memory[0x0001] = 0x00; // nop
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  int r = 0;
+  if (z.pc != 1 || z.int_accept != Z80_ACCEPT_NMI_ONLY || !z.int_pending) {
+    printf("*** ERROR %s after EI: pc %04X accept %u int %d"
+        " (expected 0001 NMI_ONLY 1)\n", name, z.pc, z.int_accept,
+        z.int_pending);
+    r = 1;
+  }
+  z80_step(&z);
+  r += expect_taken(name, &z, 0x0002);
+  return r;
+}
+
+static int check_prefix_ei_ei_nop(void) {
+  const char* name = "EI EI NOP with INT";
+  z80 z;
+  init_prefix_ei_cpu(&z);
+  memory[0x0000] = 0xFB; // ei
+  memory[0x0001] = 0xFB; // ei
+  memory[0x0002] = 0x00; // nop
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  z80_step(&z);
+  int r = 0;
+  if (z.pc != 2 || z.int_accept != Z80_ACCEPT_NMI_ONLY || !z.int_pending) {
+    printf("*** ERROR %s after two EIs: pc %04X accept %u int %d"
+        " (expected 0002 NMI_ONLY 1)\n", name, z.pc, z.int_accept,
+        z.int_pending);
+    r = 1;
+  }
+  z80_step(&z);
+  r += expect_taken(name, &z, 0x0003);
+  return r;
+}
+
+static int check_prefix_ei_dd_op(void) {
+  const char* name = "EI DD LD IX with INT";
+  z80 z;
+  init_prefix_ei_cpu(&z);
+  memory[0x0000] = 0xFB; // ei
+  memory[0x0001] = 0xDD;
+  memory[0x0002] = 0x21; // ld ix,**
+  memory[0x0003] = 0x34;
+  memory[0x0004] = 0x12;
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  z80_step(&z);
+  int r = 0;
+  if (z.pc != 2 || !z.int_pending || z.ix != 0) {
+    printf("*** ERROR %s after the prefix: pc %04X int %d ix %04X"
+        " (expected 0002 1 0000)\n", name, z.pc, z.int_pending, z.ix);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the prefix", &z);
+  z80_step(&z);
+  if (z.ix != 0x1234) {
+    printf("*** ERROR %s after the opcode: ix %04X (expected 1234)\n",
+        name, z.ix);
+    r = 1;
+  }
+  r += expect_taken(name, &z, 0x0005);
+  return r;
+}
+
+static int check_prefix_ei_nmi(void) {
+  const char* name = "EI NOP with NMI";
+  z80 z;
+  init_prefix_ei_cpu(&z);
+  memory[0x0000] = 0xFB; // ei
+  memory[0x0001] = 0x00; // nop
+  z80_gen_nmi(&z);
+  z80_step(&z);
+  int r = 0;
+  if (z.pc != 0x0066 || z.nmi_pending || pushed_return(&z) != 0x0001) {
+    printf("*** ERROR %s: pc %04X return %04X nmi %d (expected 0066 0001 0)\n",
+        name, z.pc, pushed_return(&z), z.nmi_pending);
+    r = 1;
+  }
+  return r;
+}
+
+// T10, IM0 prefix: the bus gives DD, then 0x21 over INTA, then the
+// operands at the frozen PC. The acknowledge step leaves DD with the IM0
+// run still open; the next step loads IX and leaves PC frozen.
+static int prefix_im0_intas;
+static int prefix_im0_reads;
+
+static uint8_t prefix_im0_bus(z80* const bus_z, uint16_t bus_pc,
+    z80_im0_cycle_t cycle) {
+  (void)bus_z;
+  (void)bus_pc;
+  if (cycle == Z80_IM0_INTA) {
+    prefix_im0_intas++;
+    return 0x21; // ld iz,** after the DD prefix
+  }
+  prefix_im0_reads++;
+  return prefix_im0_reads == 1 ? 0x34 : 0x12;
+}
+
+static int check_prefix_im0_once(bool derived) {
+  const char* name = derived ? "IM0 prefix derived" : "IM0 prefix";
+  z80 z;
+  init_prefix_cpu(&z);
+  z.interrupt_mode = 0;
+  z.iff1 = 1;
+  z.iff2 = 1;
+  z.im0_bus = prefix_im0_bus;
+  prefix_im0_intas = 0;
+  prefix_im0_reads = 0;
+  if (derived) {
+    z80_set_cyc_source(&z, Z80_CYC_FROM_WAIT_SLOTS);
+    z.periodic_wait_mask = 0xD;
+  }
+  z80_gen_int(&z, 0xDD); // the prefix byte on the bus
+  z80_step(&z);
+  int r = 0;
+  if (z.pc != 1 || z.pending_prefix != Z80_PREFIX_DD || !z.im0_active ||
+      z.cyc != 3) {
+    printf("*** ERROR %s after the acknowledge: pc %04X pending %02X"
+        " active %d cyc %lu (expected 0001 DD 1 3)\n",
+        name, z.pc, z.pending_prefix, z.im0_active, z.cyc);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the acknowledge", &z);
+  z80_step(&z);
+  if (z.pc != 1 || z.pending_prefix != Z80_PREFIX_NONE || z.im0_active ||
+      z.cyc != 7 || z.ix != 0x1234 || prefix_im0_intas != 1 ||
+      prefix_im0_reads != 2) {
+    printf("*** ERROR %s after the opcode: pc %04X pending %02X active %d"
+        " cyc %lu ix %04X intas %d reads %d"
+        " (expected 0001 NONE 0 7 1234 1 2)\n",
+        name, z.pc, z.pending_prefix, z.im0_active, z.cyc, z.ix,
+        prefix_im0_intas, prefix_im0_reads);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the opcode", &z);
+  return r;
+}
+
+static int check_prefix_im0(void) {
+  int r = 0;
+  r += check_prefix_im0_once(false);
+  r += check_prefix_im0_once(true);
+  return r;
+}
+
+// T11, invariant: accept is NONE exactly while a prefix is pending,
+// across a DDCB run and an EI+NMI run.
+static int check_prefix_invariant(void) {
+  const char* name = "accept invariant";
+  z80 z;
+  init_prefix_cpu(&z);
+  memory[0x0000] = 0xDD;
+  memory[0x0001] = 0xCB;
+  memory[0x0002] = 0x05;
+  memory[0x0003] = 0x46; // bit 0,(ix+5)
+  memory[0x0004] = 0xFB; // ei
+  z.ix = 0x4000;
+  memory[0x4005] = 0x81;
+  int r = 0;
+  for (int step = 0; step < 3; step++) {
+    z80_step(&z);
+    r += check_accept_matches_prefix(name, "on a DDCB step", &z);
+  }
+  if (z.pc != 4 || z.pending_prefix != Z80_PREFIX_NONE ||
+      z.int_accept != Z80_ACCEPT_ALL) {
+    printf("*** ERROR %s after DDCB: pc %04X pending %02X accept %u"
+        " (expected 0004 NONE ALL)\n", name, z.pc, z.pending_prefix,
+        z.int_accept);
+    r = 1;
+  }
+  z80_gen_nmi(&z);
+  z80_step(&z); // EI with NMI: taken at once
+  if (z.pc != 0x0066 || z.int_accept != Z80_ACCEPT_ALL) {
+    printf("*** ERROR %s after EI+NMI: pc %04X accept %u"
+        " (expected 0066 ALL)\n", name, z.pc, z.int_accept);
+    r = 1;
+  }
+  r += check_accept_matches_prefix(name, "after the acknowledge", &z);
+  return r;
+}
+
+static int run_prefix_step_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  r += check_prefix_single();
+  r += check_prefix_chain();
+  r += check_prefix_cb();
+  r += check_prefix_ldir();
+  r += check_prefix_ddcb();
+  r += check_prefix_dd_ed();
+  r += check_prefix_ed_dd();
+  r += check_prefix_int();
+  r += check_prefix_nmi();
+  r += check_prefix_ei_nop();
+  r += check_prefix_ei_ei_nop();
+  r += check_prefix_ei_dd_op();
+  r += check_prefix_ei_nmi();
+  r += check_prefix_im0();
+  r += check_prefix_invariant();
+  printf("*** per-prefix step test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);
   return r != 0;
 }
@@ -1193,7 +1572,8 @@ static int check_q_after_ld_a_i(void) {
   z.iff2 = 1;
   seed_qf(&z, 0xFF);
   z.q = 0xA5;
-  z80_step(&z);
+  z80_step(&z); // ED prefix
+  z80_step(&z); // ld a,i
   if (z.a != 0x80 || pack_qf(&z) != 0x85 || z.q != 0x85) {
     printf("*** ERROR %s: a %02X q %02X f %02X (expected 80 85 85)\n",
         name, z.a, z.q, pack_qf(&z));
@@ -1215,8 +1595,9 @@ static int check_scf_after_bit(void) {
   seed_qf(&z, 0);
   z.b = 0x08;
   z.q = 0xA5;
-  z80_step(&z);
-  z80_step(&z);
+  z80_step(&z); // CB prefix
+  z80_step(&z); // bit 3,b
+  z80_step(&z); // scf
   if (pack_qf(&z) != 0x01 || z.q != 0x01) {
     printf("*** ERROR %s: q %02X f %02X (expected 01 01)\n", name, z.q,
         pack_qf(&z));
@@ -1285,7 +1666,8 @@ static int check_dd_scf_clears_q(void) {
   z.a = 0;
   seed_qf(&z, 0x44);
   z.q = 0xFF;
-  z80_step(&z);
+  z80_step(&z); // DD prefix step: clears Q
+  z80_step(&z); // SCF itself
   if (pack_qf(&z) != 0x45 || z.q != 0x45) {
     printf("*** ERROR %s: q %02X f %02X (expected 45 45)\n", name, z.q,
         pack_qf(&z));
@@ -2216,7 +2598,7 @@ static unsigned long strobe_slot_0xd(unsigned long entry) {
 
 static int check_strobe_shape(const char* name, const uint8_t* bytes,
     const char* want_kinds, int port_kind, int derived, int settles_first,
-    long want_rel_begin, long want_rel_end) {
+    long want_rel_begin, long want_rel_end, int split_prefix) {
   int failed = 0;
   static const uint8_t masks[] = {0x0, 0xD};
   for (unsigned mi = 0; mi < sizeof masks; mi++)
@@ -2244,6 +2626,32 @@ static int check_strobe_shape(const char* name, const uint8_t* bytes,
     // that executes it, so discard the executing step and check the next.
     if (settles_first)
       z80_step(&z);
+    // A prefixed shape costs two steps: the prefix byte's own M1 first,
+    // checked here, then the opcode step below with want_kinds holding the
+    // remaining events.
+    if (split_prefix) {
+      const unsigned long pbase = strobe_cpu->t_counter;
+      z80_step(&z);
+      const unsigned long pwant =
+          masks[mi] == 0 ? pbase + 1 : strobe_slot_0xd(pbase);
+      char pwhere[96];
+      snprintf(pwhere, sizeof pwhere, "%s prefix mask=%X entry=%lu%s", name,
+          masks[mi], pbase, derived ? " derived" : "");
+      if (z.step_m1_sample_tstate != pwant) {
+        printf("*** ERROR %s: sample slot %lu (want %lu)\n", pwhere,
+            z.step_m1_sample_tstate, pwant);
+        failed = 1;
+      }
+      if (strobe_event_count != 1 || strobe_events[0].kind != 'm' ||
+          strobe_events[0].start != pbase ||
+          strobe_events[0].sample != pwant) {
+        printf("*** ERROR %s: prefix step events %d (want 1 m)\n", pwhere,
+            strobe_event_count);
+        failed = 1;
+        continue;
+      }
+      strobe_event_count = 0;
+    }
     const unsigned long base = strobe_cpu->t_counter;
     strobe_event_count = 0;
     z80_step(&z);
@@ -2468,16 +2876,16 @@ static int run_strobe_test(void) {
   static const uint8_t ini[] = {0xED, 0xA2, 0, 0, 0, 0, 0, 0};
   static const uint8_t halt[] = {0x76, 0, 0, 0, 0, 0, 0, 0};
   for (int derived = 0; derived < 2; derived++) {
-    r += check_strobe_shape("nop", nop, "m", 0, derived, 0, -1, -1);
-    r += check_strobe_shape("ld a,(nn)", ld_a_nn, "mrrr", 0, derived, 0, -1, -1);
-    r += check_strobe_shape("ld (nn),a", ld_nn_a, "mrrw", 0, derived, 0, -1, -1);
-    r += check_strobe_shape("in a,(n)", in_a_n, "mri", 'i', derived, 0, 16, 21);
-    r += check_strobe_shape("out (n),a", out_n_a, "mro", 'o', derived, 0, 16, 21);
-    r += check_strobe_shape("in b,(c)", in_b_c, "mmi", 0, derived, 0, 18, 29);
-    r += check_strobe_shape("out (c),b", out_c_b, "mmo", 0, derived, 0, 18, 29);
-    r += check_strobe_shape("outi", outi, "mmro", 0, derived, 0, 32, 37);
-    r += check_strobe_shape("ini", ini, "mmiw", 0, derived, 0, 20, 29);
-    r += check_strobe_shape("halt", halt, "", 0, derived, 1, -1, -1);
+    r += check_strobe_shape("nop", nop, "m", 0, derived, 0, -1, -1, 0);
+    r += check_strobe_shape("ld a,(nn)", ld_a_nn, "mrrr", 0, derived, 0, -1, -1, 0);
+    r += check_strobe_shape("ld (nn),a", ld_nn_a, "mrrw", 0, derived, 0, -1, -1, 0);
+    r += check_strobe_shape("in a,(n)", in_a_n, "mri", 'i', derived, 0, 16, 21, 0);
+    r += check_strobe_shape("out (n),a", out_n_a, "mro", 'o', derived, 0, 16, 21, 0);
+    r += check_strobe_shape("in b,(c)", in_b_c, "mi", 0, derived, 0, 10, 21, 1);
+    r += check_strobe_shape("out (c),b", out_c_b, "mo", 0, derived, 0, 10, 21, 1);
+    r += check_strobe_shape("outi", outi, "mro", 0, derived, 0, 24, 29, 1);
+    r += check_strobe_shape("ini", ini, "miw", 0, derived, 0, 12, 21, 1);
+    r += check_strobe_shape("halt", halt, "", 0, derived, 1, -1, -1, 0);
   }
   r += check_sample_slot_rows();
   r += check_im0_clears_high_byte();
@@ -2648,14 +3056,11 @@ int main(int argc, char** argv) {
   if (argc > 1 && strcmp(argv[1], "chainlong") == 0) {
     return run_chain_long_test();
   }
-  if (argc > 1 && strcmp(argv[1], "chainfull") == 0) {
-    return run_chain_full_test();
-  }
-  if (argc > 1 && strcmp(argv[1], "chainsplit") == 0) {
-    return run_chain_split_test();
-  }
   if (argc > 1 && strcmp(argv[1], "chainim0") == 0) {
     return run_chain_im0_test();
+  }
+  if (argc > 1 && strcmp(argv[1], "prefixstep") == 0) {
+    return run_prefix_step_test();
   }
   if (argc > 1 && strcmp(argv[1], "qlatch") == 0) {
     return run_qlatch_test();
@@ -2713,9 +3118,8 @@ int main(int argc, char** argv) {
     r += run_reti_iff_test();
     r += run_stray_r_test();
     r += run_chain_long_test();
-    r += run_chain_full_test();
-    r += run_chain_split_test();
     r += run_chain_im0_test();
+    r += run_prefix_step_test();
     r += run_qlatch_test();
     r += run_cyc_source_test();
   }

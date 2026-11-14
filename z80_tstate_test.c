@@ -51,6 +51,10 @@
 
 static uint8_t ram[0x10000];
 static z80 *active_cpu;
+/* T value at the start of the current step. Every prefix is its own step
+   now, so a bus start recorded mid-instruction must be measured from the
+   step's own start, not from the instruction's first M1. */
+static unsigned long step_t_base;
 
 #define MAX_EVENTS 128
 static unsigned event_start[MAX_EVENTS];
@@ -60,14 +64,16 @@ static uint8_t read_byte(void *user_data, uint16_t addr, z80_read_kind_t kind) {
   (void)user_data;
   (void)kind;
   if (event_count < MAX_EVENTS)
-    event_start[event_count++] = CALLBACK_BUS_CYCLE_START(active_cpu);
+    event_start[event_count++] =
+        (unsigned)(CALLBACK_BUS_CYCLE_START(active_cpu) - step_t_base);
   return ram[addr];
 }
 
 static void write_byte(void *user_data, uint16_t addr, uint8_t value) {
   (void)user_data;
   if (event_count < MAX_EVENTS)
-    event_start[event_count++] = CALLBACK_BUS_CYCLE_START(active_cpu);
+    event_start[event_count++] =
+        (unsigned)(CALLBACK_BUS_CYCLE_START(active_cpu) - step_t_base);
   ram[addr] = value;
 }
 
@@ -75,7 +81,8 @@ static uint8_t port_in(z80 *cpu, uint16_t port) {
   (void)port;
   (void)cpu;
   if (event_count < MAX_EVENTS)
-    event_start[event_count++] = CALLBACK_BUS_CYCLE_START(cpu);
+    event_start[event_count++] =
+        (unsigned)(CALLBACK_BUS_CYCLE_START(cpu) - step_t_base);
   return 0;
 }
 
@@ -84,7 +91,8 @@ static void port_out(z80 *cpu, uint16_t port, uint8_t value) {
   (void)value;
   (void)cpu;
   if (event_count < MAX_EVENTS)
-    event_start[event_count++] = CALLBACK_BUS_CYCLE_START(cpu);
+    event_start[event_count++] =
+        (unsigned)(CALLBACK_BUS_CYCLE_START(cpu) - step_t_base);
 }
 
 static int failures;
@@ -114,7 +122,7 @@ static void set_base(z80 *z) {
   z->mem_ptr = 0;
   z->q = 0;
   z->sf = z->zf = z->yf = z->hf = z->xf = z->pf = z->nf = z->cf = 0;
-  z->iff_delay = 0;
+  z->int_accept = Z80_ACCEPT_ALL;
   z->interrupt_mode = 1;
   z->int_data = 0;
   z->iff1 = 0;
@@ -130,6 +138,11 @@ static unsigned t_counter_before, cyc_before;
 static void begin_step(z80 *z) {
   event_count = 0;
   active_cpu = z;
+#if CHECK_BUS_TIMES
+  step_t_base = (unsigned long)READ_T_COUNTER(z);
+#else
+  step_t_base = 0;
+#endif
   t_counter_before = READ_T_COUNTER(z);
   cyc_before = z->cyc;
 }
@@ -178,6 +191,23 @@ static void end_step(const char *label, z80 *z) {
   (void)label;
   (void)z;
 #endif
+}
+
+/* Same delta check as end_step for a step that legitimately drives no bus
+   cycle: the DDCB tail reads its bytes in the earlier steps, and an opcode
+   run off the frozen IM0 bus arrives through the INTA path, which has no
+   callback, while the handler itself (RLC, NEG) touches no memory. */
+static void end_step_quiet(const char *label, z80 *z) {
+  unsigned delta_t = READ_T_COUNTER(z) - t_counter_before;
+  unsigned delta_cyc = z->cyc - cyc_before;
+  if (delta_t != delta_cyc) {
+    printf("FAIL %s: bus plus internal T is %u, generic cost is %u\n", label, delta_t, delta_cyc);
+    ++failures;
+  }
+  if (event_count != 0) {
+    printf("FAIL %s: %u bus events, want none\n", label, event_count);
+    ++failures;
+  }
 }
 
 static void check_pc(const char *label, z80 *z, uint16_t want) {
@@ -254,6 +284,9 @@ static void load_bytes(const uint8_t *b, int n) {
   memcpy(ram + 0x1000, b, (size_t)n);
 }
 
+/* One prefix step: a single 4 T M1 fetch, pc + 1. */
+static const int prefix_step_row[] = {4};
+
 /* Conditional base opcodes, covered both ways below instead of here. */
 static int is_cond_base(uint8_t op) {
   if (op == 0x10 || op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38)
@@ -293,8 +326,12 @@ static void sweep_cb(void) {
     set_base(&z);
     uint8_t code[2] = {0xCB, (uint8_t)op};
     load_bytes(code, 2);
-    char label[32];
+    char prefix_label[40], label[32];
+    snprintf(prefix_label, sizeof(prefix_label), "cb %02X prefix", op);
     snprintf(label, sizeof(label), "cb %02X", op);
+    begin_step(&z);
+    z80_step(&z);
+    end_step(prefix_label, &z);
     begin_step(&z);
     z80_step(&z);
     end_step(label, &z);
@@ -310,8 +347,12 @@ static void sweep_ed(void) {
     z.c = 1;
     uint8_t code[2] = {0xED, (uint8_t)op};
     load_bytes(code, 2);
-    char label[32];
+    char prefix_label[40], label[32];
+    snprintf(prefix_label, sizeof(prefix_label), "ed %02X prefix", op);
     snprintf(label, sizeof(label), "ed %02X", op);
+    begin_step(&z);
+    z80_step(&z);
+    end_step(prefix_label, &z);
     begin_step(&z);
     z80_step(&z);
     end_step(label, &z);
@@ -334,6 +375,15 @@ static void run_ddfd(uint8_t prefix, uint8_t op, const uint8_t *tail, int tail_n
   begin_step(&z);
   z80_step(&z);
   end_step(label, &z);
+  /* The opcode (and, for DDCB, the tail) step follows the prefix step. */
+  begin_step(&z);
+  z80_step(&z);
+  end_step(label, &z);
+  if (op == 0xCB) {
+    begin_step(&z);
+    z80_step(&z);
+    end_step(label, &z);
+  }
 }
 
 static void sweep_ddfd(uint8_t prefix, const char *tag) {
@@ -486,7 +536,8 @@ static void cond_cases(void) {
 
 /* One repeat-capable block op, repeating (pc rewinds) or ending. The B
    family (INIR/INDR/OTIR/OTDR) counts B, the BC family the whole BC;
-   CPIR/CPDR also need no match to repeat. */
+   CPIR/CPDR also need no match to repeat. The ED prefix runs as its own
+   step first; the opcode step then runs the row minus that first fetch. */
 static void block_case(const char *label, uint8_t ed_op, int repeat, int use_b,
                        const int *rows, unsigned nrows) {
   z80 z;
@@ -501,11 +552,18 @@ static void block_case(const char *label, uint8_t ed_op, int repeat, int use_b,
     ram[0x4000] = 1; /* A reads an unequal byte, so no match ends it */
   uint8_t code[2] = {0xED, ed_op};
   load_bytes(code, 2);
+  char prefix_label[48];
+  snprintf(prefix_label, sizeof(prefix_label), "%s prefix", label);
+  begin_step(&z);
+  z80_step(&z);
+  end_step(prefix_label, &z);
+  check_pc(prefix_label, &z, 0x1001);
+  check_trace(prefix_label, &z, prefix_step_row, 1);
   begin_step(&z);
   z80_step(&z);
   end_step(label, &z);
   check_pc(label, &z, repeat ? 0x1000 : 0x1002);
-  check_trace(label, &z, rows, nrows);
+  check_trace(label, &z, rows + 1, nrows - 1);
 }
 
 static void block_cases(void) {
@@ -567,40 +625,64 @@ static void ex_sp_case(void) {
   }
 }
 
-/* IN r,(C) and OUT (C),r for every register: 4,4,4, port at 8. */
+/* IN r,(C) and OUT (C),r for every register: the ED prefix step, then
+   the opcode body 4,4 with the port at 4 in the step (8 overall). */
 static void in_out_c_cases(void) {
   for (unsigned r = 0; r < 8; ++r) {
     z80 z;
-    static const int rows[] = {4, 4, 4};
-    char label[40];
+    static const int rows[] = {4, 4};
+    char label[40], prefix_label[48];
     snprintf(label, sizeof(label), "in %u,(c)", r);
+    snprintf(prefix_label, sizeof(prefix_label), "in %u,(c) prefix", r);
     set_base(&z);
     uint8_t code_in[2] = {0xED, (uint8_t)(0x40 + 8 * r)};
     load_bytes(code_in, 2);
     begin_step(&z);
     z80_step(&z);
+    end_step(prefix_label, &z);
+    check_trace(prefix_label, &z, prefix_step_row, 1);
+    begin_step(&z);
+    z80_step(&z);
     end_step(label, &z);
-    check_trace(label, &z, rows, 3);
+    check_trace(label, &z, rows, 2);
     snprintf(label, sizeof(label), "out (c),%u", r);
+    snprintf(prefix_label, sizeof(prefix_label), "out (c),%u prefix", r);
     set_base(&z);
     uint8_t code_out[2] = {0xED, (uint8_t)(0x41 + 8 * r)};
     load_bytes(code_out, 2);
     begin_step(&z);
     z80_step(&z);
+    end_step(prefix_label, &z);
+    check_trace(prefix_label, &z, prefix_step_row, 1);
+    begin_step(&z);
+    z80_step(&z);
     end_step(label, &z);
-    check_trace(label, &z, rows, 3);
+    check_trace(label, &z, rows, 2);
   }
 }
 
-/* DDCB: displacement and op bytes are 3 T reads at 8 and 11; BIT stops
-   after the (IX+d) read at 16, other forms write at 20. */
+/* DDCB in three steps: the DD prefix (4 T fetch), the CB prefix (4 T
+   fetch, entering the DDCB tail state), then the body reading the
+   displacement and op bytes (3 T reads at 0 and 3), two internal T, the
+   (IX+d) read at 8, one internal T, and for non-BIT forms the write
+   at 12. */
 static void ddcb_cases(void) {
-  static const int bit_rows[] = {4, 4, 3, 5, 4};
-  static const int other_rows[] = {4, 4, 3, 5, 4, 3};
+  static const int bit_rows[] = {3, 3, -2, 3, -1};
+  static const int other_rows[] = {3, 3, -2, 3, -1, 3};
   z80 z;
   set_base(&z);
   uint8_t code_bit[4] = {0xDD, 0xCB, 0x05, 0x46};
   load_bytes(code_bit, 4);
+  begin_step(&z);
+  z80_step(&z);
+  end_step("ddcb bit prefix", &z);
+  check_pc("ddcb bit prefix", &z, 0x1001);
+  check_trace("ddcb bit prefix", &z, prefix_step_row, 1);
+  begin_step(&z);
+  z80_step(&z);
+  end_step("ddcb bit cb", &z);
+  check_pc("ddcb bit cb", &z, 0x1002);
+  check_trace("ddcb bit cb", &z, prefix_step_row, 1);
   begin_step(&z);
   z80_step(&z);
   end_step("ddcb bit", &z);
@@ -611,40 +693,69 @@ static void ddcb_cases(void) {
   load_bytes(code_rlc, 4);
   begin_step(&z);
   z80_step(&z);
+  end_step("ddcb rlc prefix", &z);
+  check_pc("ddcb rlc prefix", &z, 0x1001);
+  check_trace("ddcb rlc prefix", &z, prefix_step_row, 1);
+  begin_step(&z);
+  z80_step(&z);
+  end_step("ddcb rlc cb", &z);
+  check_pc("ddcb rlc cb", &z, 0x1002);
+  check_trace("ddcb rlc cb", &z, prefix_step_row, 1);
+  begin_step(&z);
+  z80_step(&z);
   end_step("ddcb rlc", &z);
   check_pc("ddcb rlc", &z, 0x1004);
   check_trace("ddcb rlc", &z, other_rows, 6);
 }
 
-/* LD r,(IX+d) and ALU (IX+d) read the data byte after the 5 internal
-   displacement-add T, so the read sits at 16, not 11. */
+/* LD r,(IX+d) and ALU (IX+d) in two steps: the DD prefix, then the
+   body running the old row minus its first 4 T: the op fetch, the
+   displacement read, 5 internal displacement-add T, and the data
+   read at 12 in the step (16 overall). */
 static void ix_d_read_cases(void) {
-  static const int rows[] = {4, 4, 3, -5, 3};
+  static const int rows[] = {4, 3, -5, 3};
   z80 z;
   set_base(&z);
   uint8_t code_ld[3] = {0xDD, 0x46, 0x05};
   load_bytes(code_ld, 3);
   begin_step(&z);
   z80_step(&z);
+  end_step("ld b,(ix+5) prefix", &z);
+  check_pc("ld b,(ix+5) prefix", &z, 0x1001);
+  check_trace("ld b,(ix+5) prefix", &z, prefix_step_row, 1);
+  begin_step(&z);
+  z80_step(&z);
   end_step("ld b,(ix+5)", &z);
   check_pc("ld b,(ix+5)", &z, 0x1003);
-  check_trace("ld b,(ix+5)", &z, rows, 5);
+  check_trace("ld b,(ix+5)", &z, rows, 4);
   set_base(&z);
   uint8_t code_add[3] = {0xDD, 0x86, 0x05};
   load_bytes(code_add, 3);
   begin_step(&z);
   z80_step(&z);
+  end_step("add a,(ix+5) prefix", &z);
+  check_pc("add a,(ix+5) prefix", &z, 0x1001);
+  check_trace("add a,(ix+5) prefix", &z, prefix_step_row, 1);
+  begin_step(&z);
+  z80_step(&z);
   end_step("add a,(ix+5)", &z);
   check_pc("add a,(ix+5)", &z, 0x1003);
-  check_trace("add a,(ix+5)", &z, rows, 5);
+  check_trace("add a,(ix+5)", &z, rows, 4);
 }
-/* LD (IX+d),n reads its n byte at 11, like the DDCB op byte. */
+/* LD (IX+d),n in two steps: the DD prefix, then the body running the
+   old row minus its first 4 T: the op fetch, the displacement and n
+   reads, 2 internal T, and the write at 12 in the step (16 overall). */
 static void ix_d_n_case(void) {
   z80 z;
-  static const int rows[] = {4, 4, 3, 5, 3};
+  static const int rows[] = {4, 3, 3, -2, 3};
   set_base(&z);
   uint8_t code[4] = {0xDD, 0x36, 0x05, 0x42};
   load_bytes(code, 4);
+  begin_step(&z);
+  z80_step(&z);
+  end_step("ld (ix+5),n prefix", &z);
+  check_pc("ld (ix+5),n prefix", &z, 0x1001);
+  check_trace("ld (ix+5),n prefix", &z, prefix_step_row, 1);
   begin_step(&z);
   z80_step(&z);
   end_step("ld (ix+5),n", &z);
@@ -656,8 +767,13 @@ static void ix_d_n_case(void) {
   }
 }
 
-/* IM 0 with a prefix byte: the diverted fetch, the first INTA, the
-   follow-on INTA carrying the prefixed opcode, then the off-bus body. */
+/* IM 0 with a prefix byte in two steps. The acknowledge step runs the
+   NOP off the bus, takes the interrupt (first INTA, internal) and the
+   prefix itself (own M1 fetch): 4,-6 with the pc past the NOP. The
+   follow-on step fetches the prefixed opcode through the second INTA
+   and runs the body off the frozen bus: the INTA has no callback and
+   RLC/NEG touch no memory, so only the T-vs-cost delta is pinned, with
+   pc frozen and iff1 cleared by the acknowledge. */
 static uint8_t im0_follow;
 static uint8_t im0_bus_override(z80 *z, uint16_t pc, z80_im0_cycle_t cycle) {
   (void)z;
@@ -667,7 +783,7 @@ static uint8_t im0_bus_override(z80 *z, uint16_t pc, z80_im0_cycle_t cycle) {
 }
 
 static void im0_prefix_cases(void) {
-  static const int rows[] = {4, -6, -6};
+  static const int ack_rows[] = {4, -6};
   z80 z;
   set_base(&z);
   z.im0_bus = im0_bus_override;
@@ -679,9 +795,13 @@ static void im0_prefix_cases(void) {
   z80_gen_int(&z, 0xCB);
   begin_step(&z);
   z80_step(&z);
-  end_step("im0 cb 00", &z);
+  end_step("im0 cb 00 ack", &z);
+  check_pc("im0 cb 00 ack", &z, 0x1001);
+  check_trace("im0 cb 00 ack", &z, ack_rows, 2);
+  begin_step(&z);
+  z80_step(&z);
+  end_step_quiet("im0 cb 00", &z);
   check_pc("im0 cb 00", &z, 0x1001);
-  check_trace("im0 cb 00", &z, rows, 3);
   set_base(&z);
   z.im0_bus = im0_bus_override;
   z.interrupt_mode = 0;
@@ -692,9 +812,13 @@ static void im0_prefix_cases(void) {
   z80_gen_int(&z, 0xED);
   begin_step(&z);
   z80_step(&z);
-  end_step("im0 ed 44", &z);
+  end_step("im0 ed 44 ack", &z);
+  check_pc("im0 ed 44 ack", &z, 0x1001);
+  check_trace("im0 ed 44 ack", &z, ack_rows, 2);
+  begin_step(&z);
+  z80_step(&z);
+  end_step_quiet("im0 ed 44", &z);
   check_pc("im0 ed 44", &z, 0x1001);
-  check_trace("im0 ed 44", &z, rows, 3);
   if (z.iff1) {
     printf("FAIL im0 prefix: iff1 still set after acknowledge\n");
     ++failures;
@@ -743,7 +867,8 @@ static void cpc_table_cases(void) {
   load_bytes(code_jrnc, 2);
   begin_step(&z);
   cpc_t_check("cpc jr nc taken", &z, 12, 0x1006);
-  /* LDIR repeating: 21 T. */
+  /* LDIR repeating: 21 T. The ED byte is its own prefix step (4 T, pc
+     to 0x1001); the body rewinds to 0x1000 for the next pass. */
   set_base(&z);
   z.timing = &z80_timing_cpc;
   z.b = 0;
@@ -751,8 +876,10 @@ static void cpc_table_cases(void) {
   uint8_t code_ldir[2] = {0xED, 0xB0};
   load_bytes(code_ldir, 2);
   begin_step(&z);
-  cpc_t_check("cpc ldir repeat", &z, 21, 0x1000);
-  /* CPIR repeating: 21 T. */
+  cpc_t_check("cpc ldir repeat prefix", &z, 4, 0x1001);
+  begin_step(&z);
+  cpc_t_check("cpc ldir repeat", &z, 17, 0x1000);
+  /* CPIR repeating: 21 T, same two-step shape. */
   set_base(&z);
   z.timing = &z80_timing_cpc;
   z.b = 0;
@@ -761,7 +888,9 @@ static void cpc_table_cases(void) {
   uint8_t code_cpir[2] = {0xED, 0xB1};
   load_bytes(code_cpir, 2);
   begin_step(&z);
-  cpc_t_check("cpc cpir repeat", &z, 21, 0x1000);
+  cpc_t_check("cpc cpir repeat prefix", &z, 4, 0x1001);
+  begin_step(&z);
+  cpc_t_check("cpc cpir repeat", &z, 17, 0x1000);
   /* Acknowledges: NMI 15, IM0 10, IM1 17, IM2 23 T. */
   set_base(&z);
   z.timing = &z80_timing_cpc;
@@ -886,11 +1015,22 @@ static void undefined_ed_case(uint8_t op) {
   dup2(err_fd, STDERR_FILENO);
   unsigned long cyc_before_step = z.cyc;
   z80_step(&z);
+  unsigned long cyc_after_prefix = z.cyc;
+  uint16_t pc_after_prefix = z.pc;
+  z80_step(&z);
   fflush(stderr);
   dup2(saved_err, STDERR_FILENO);
   close(saved_err);
   off_t printed = lseek(err_fd, 0, SEEK_END);
   close(err_fd);
+  if (cyc_after_prefix - cyc_before_step != 1) {
+    printf("FAIL %s: prefix cost is %lu us, want 1\n", label, cyc_after_prefix - cyc_before_step);
+    ++failures;
+  }
+  if (pc_after_prefix != 0x1001) {
+    printf("FAIL %s: pc after prefix is %04X, want 1001 (wrong path ran)\n", label, pc_after_prefix);
+    ++failures;
+  }
   if (z.cyc - cyc_before_step != 2) {
     printf("FAIL %s: cost is %lu us, want 2\n", label, z.cyc - cyc_before_step);
     ++failures;

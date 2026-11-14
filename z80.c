@@ -870,6 +870,21 @@ static inline uint16_t displace(
   return addr;
 }
 
+// A prefix byte just fetched (or just arrived on the bus): its own step
+// charge, an R bump, a cleared Q latch, and the state the next step
+// decodes. The charge is the timing table's entry for that byte, the same
+// cost the old prefix loop paid per further prefix. No interrupt is
+// accepted at the boundary after a prefix step.
+static inline void take_prefix(z80* const z, uint8_t pending) {
+  // One M1 fetch costs P whatever the prefix byte is (cyc_ddfd[CB] is 0:
+  // the CB byte's fetch is paid here, its handler subtracts P again).
+  if (cyc_table_now(z)) z->cyc += z->timing->cyc_ddfd[0xDD];
+  inc_r(z);
+  q_clear(z);
+  z->pending_prefix = pending;
+  z->int_accept = Z80_ACCEPT_NONE;
+}
+
 static inline void process_interrupts(z80* const z) {
   // An NMI/IM1/IM2 acknowledge is charged like a step, from the slot the
   // next opcode fetch would have sampled to the slot after the
@@ -887,12 +902,10 @@ static inline void process_interrupts(z80* const z) {
   const bool ack_derived = ack_latched_derived && ack_free_phase < 4;
   const unsigned long ack_start_slot =
       ack_derived ? align_free_slot(z->t_counter + 1, ack_free_phase) : 0;
-  // A prefix chain split across steps takes no interrupt at the split
-  // boundary: the chain resumes on the next step, and only the boundary
-  // after the terminating instruction can accept. NMI stays latched in
-  // nmi_pending, INT stays pending. This covers the trailing check and a
-  // host-driven z80_check_interrupt() alike.
-  if (z->prefix_carry) {
+  // A prefix step takes no interrupt at its boundary: NMI stays latched
+  // in nmi_pending, INT stays pending. This covers the trailing check and
+  // a host-driven z80_check_interrupt() alike.
+  if (z->int_accept == Z80_ACCEPT_NONE) {
     return;
   }
   // NMI is recognised at the end of every instruction, whatever the
@@ -901,6 +914,7 @@ static inline void process_interrupts(z80* const z) {
     z->nmi_pending = 0;
     z->halted = 0;
     z->iff1 = 0;
+    z->int_accept = Z80_ACCEPT_ALL;
     q_clear(z);
     inc_r(z);
 
@@ -921,10 +935,10 @@ static inline void process_interrupts(z80* const z) {
 
   // "When an EI instruction is executed, any pending interrupt request
   // is not accepted until after the instruction following EI is executed."
-  // EI sets the flag for the whole boundary after it, however often the
-  // host checks it (z80_check_interrupt()); z80_step() clears it when the
-  // next instruction starts.
-  if (z->iff_delay) {
+  // EI sets NMI_ONLY for the whole boundary after it, however often the
+  // host checks it (z80_check_interrupt()); the next step's entry sets
+  // ALL again when its own instruction runs.
+  if (z->int_accept == Z80_ACCEPT_NMI_ONLY) {
     return;
   }
 
@@ -933,6 +947,7 @@ static inline void process_interrupts(z80* const z) {
     z->halted = 0;
     z->iff1 = 0;
     z->iff2 = 0;
+    z->int_accept = Z80_ACCEPT_ALL;
     // accepting the interrupt drops the running instruction's flag
     // state; the call (or the IM 0 instruction below) latches Q itself.
     q_clear(z);
@@ -953,12 +968,26 @@ static inline void process_interrupts(z80* const z) {
       z->cyc += z->timing->int_ack_im0;
       z->im0_active = 1;
       q_clear(z);
-      exec_opcode(z, z->int_data);
-      z->im0_active = 0;
-      // The off-bus instruction latches Q like any step does: without this
-      // a host-driven check would leave the pre-step latch behind while
-      // the in-step check leaves the instruction's flags.
-      z->q = z->flags_written ? get_f(z) : 0;
+      // The bus byte runs the same prefix logic as a fetched byte: a
+      // prefix leaves its state pending and the bus active for the
+      // follow-on steps, anything else runs at once.
+      if (z->int_data == 0xCB)
+        take_prefix(z, Z80_PREFIX_CB);
+      else if (z->int_data == 0xED)
+        take_prefix(z, Z80_PREFIX_ED);
+      else if (z->int_data == 0xDD)
+        take_prefix(z, Z80_PREFIX_DD);
+      else if (z->int_data == 0xFD)
+        take_prefix(z, Z80_PREFIX_FD);
+      else
+        exec_opcode(z, z->int_data);
+      if (z->pending_prefix == Z80_PREFIX_NONE) {
+        z->im0_active = 0;
+        // The off-bus instruction latches Q like any step does: without
+        // this a host-driven check would leave the pre-step latch behind
+        // while the in-step check leaves the instruction's flags.
+        z->q = z->flags_written ? get_f(z) : 0;
+      }
       break;
 
     case 1:
@@ -1030,7 +1059,6 @@ void z80_init(z80* const z) {
   z->int_check_by_host = false;
   z->im0_bus = NULL;
   z->im0_active = 0;
-  z->prefix_carry = 0;
   z->userdata = NULL;
 
   z->cyc = 0;
@@ -1084,7 +1112,8 @@ void z80_init(z80* const z) {
   z->nf = 1;
   z->cf = 1;
 
-  z->iff_delay = 0;
+  z->pending_prefix = Z80_PREFIX_NONE;
+  z->int_accept = Z80_ACCEPT_ALL;
   z->interrupt_mode = 0;
   z->iff1 = 0;
   z->iff2 = 0;
@@ -1114,15 +1143,17 @@ z80_strobe_window_t z80_write_window(const z80* const z) {
 
 // executes the next instruction in memory + handles interrupts
 void z80_step(z80* const z) {
-  z->iff_delay = 0;
+  z->int_accept = Z80_ACCEPT_ALL;
   z->flags_written = 0;
   // When deriving the cycle count from the WAIT-sampled slots, the charge
   // spans from the step's own M1 sample slot to the next step's. On the
   // halted path no fetch runs; the slot is the one the fetch would have used.
   // The mode is latched here for the whole step (cyc_derived_step): the
   // charge sites below read the latch, so they agree with this span even
-  // if a callback changes the mask or source mid-step.
-  const bool derived_now = cyc_derived_now(z);
+  // if a callback changes the mask or source mid-step. A step that runs
+  // off the IM 0 bus keeps the table: the entry excludes im0_active, so
+  // the follow-on steps never add a derived span on top of it.
+  const bool derived_now = cyc_derived_now(z) && !z->im0_active;
   z->cyc_derived_step = derived_now;
   const unsigned free_phase = derived_now ? wait_free_phase(z->periodic_wait_mask) : 0;
   // The step's M1 sample slot: the first slot at or after one T past the
@@ -1140,26 +1171,72 @@ void z80_step(z80* const z) {
     // (no fetch is issued on this path); the 4 T run internal.
     internal_t_states(z, 4);
     exec_opcode(z, 0x00);
-  } else if (z->prefix_carry) {
-    // Resume a chain split across steps: the carried prefix selects the
-    // index register. A further prefix starts a fresh head; otherwise the
-    // carried prefix's already-paid charge comes off before the
-    // terminating op runs, keeping the cycle count right for any hook
-    // mid-op.
-    const uint8_t carried = z->prefix_carry;
-    z->prefix_carry = 0;
-    uint16_t* const iz = (carried == 0xDD) ? &z->ix : &z->iy;
-    const uint8_t following = fetchb(z);
-    if (following == 0xDD || following == 0xFD) {
-      exec_opcode(z, following);
-    } else {
-      if (cyc_table_now(z)) z->cyc -= z->timing->cyc_ddfd[carried];
-      exec_opcode_ddfd(z, following, iz);
+  } else if (z->pending_prefix == Z80_PREFIX_DDCB ||
+      z->pending_prefix == Z80_PREFIX_FDCB) {
+    // The DDCB step: the prefix bytes are behind us, so there is no M1
+    // and no R increment. The displacement and the final op arrive as
+    // operand reads, with two internal T between the op and the
+    // (IX/IY+d) access. The two paid prefix charges come off first, so
+    // the step lands the table's per-op cost.
+    const bool is_dd = z->pending_prefix == Z80_PREFIX_DDCB;
+    uint16_t* const iz = is_dd ? &z->ix : &z->iy;
+    z->pending_prefix = Z80_PREFIX_NONE;
+    if (cyc_table_now(z)) {
+      z->cyc -= z->timing->cyc_ddfd[is_dd ? 0xDD : 0xFD];
+      z->cyc -= z->timing->cyc_ddfd[0xDD];
     }
+    const uint16_t addr = displace(z, *iz, nextb(z));
+    const uint8_t op = nextb(z);
+    internal_t_states(z, 2);
+    exec_opcode_dcb(z, op, addr);
   } else {
+    const uint8_t pending = z->pending_prefix;
     const uint8_t opcode = fetchb(z); // M1 opcode fetch
-    exec_opcode(z, opcode);
+    if (pending == Z80_PREFIX_NONE) {
+      if (opcode == 0xCB)
+        take_prefix(z, Z80_PREFIX_CB);
+      else if (opcode == 0xED)
+        take_prefix(z, Z80_PREFIX_ED);
+      else if (opcode == 0xDD)
+        take_prefix(z, Z80_PREFIX_DD);
+      else if (opcode == 0xFD)
+        take_prefix(z, Z80_PREFIX_FD);
+      else
+        exec_opcode(z, opcode);
+    } else if (pending == Z80_PREFIX_CB) {
+      z->pending_prefix = Z80_PREFIX_NONE;
+      if (cyc_table_now(z)) z->cyc -= z->timing->cyc_ddfd[0xDD];
+      exec_opcode_cb(z, opcode);
+    } else if (pending == Z80_PREFIX_ED) {
+      z->pending_prefix = Z80_PREFIX_NONE;
+      if (cyc_table_now(z)) z->cyc -= z->timing->cyc_ddfd[0xDD];
+      exec_opcode_ed(z, opcode);
+    } else {
+      // DD/FD: the earlier prefix counts only until another prefix (or
+      // the CB tail state) replaces it. Anything else runs indexed, with
+      // the plain opcode through the default path.
+      uint16_t* const iz = (pending == Z80_PREFIX_DD) ? &z->ix : &z->iy;
+      if (opcode == 0xDD)
+        take_prefix(z, Z80_PREFIX_DD);
+      else if (opcode == 0xFD)
+        take_prefix(z, Z80_PREFIX_FD);
+      else if (opcode == 0xED)
+        take_prefix(z, Z80_PREFIX_ED);
+      else if (opcode == 0xCB)
+        take_prefix(z, (pending == Z80_PREFIX_DD) ?
+            Z80_PREFIX_DDCB : Z80_PREFIX_FDCB);
+      else {
+        z->pending_prefix = Z80_PREFIX_NONE;
+        if (cyc_table_now(z))
+          z->cyc -= z->timing->cyc_ddfd[pending == Z80_PREFIX_DD ? 0xDD : 0xFD];
+        exec_opcode_ddfd(z, opcode, iz);
+      }
+    }
   }
+  // The bus is idle again: an instruction that just ended leaves the
+  // IM 0 bus, while a prefix step stays on it for the follow-on bytes.
+  if (z->pending_prefix == Z80_PREFIX_NONE)
+    z->im0_active = 0;
 
   // The derived instruction charge lands before the INT sample point and
   // any acknowledge, so acknowledges see before + instruction as with the
@@ -1225,38 +1302,6 @@ void z80_gen_nmi(z80* const z) {
 void z80_gen_int(z80* const z, uint8_t data) {
   z->int_pending = 1;
   z->int_data = data;
-}
-
-// Runs a DD/FD prefix chain iteratively: following is the byte after the
-// chain head, head_iz the index register the head selected. Every further
-// prefix costs one fetch with its own R increment, and the running index
-// follows the last prefix. A chain that wraps all 64 KiB of memory (memory
-// path only) ends the step instead: the extra charge pays the head's fetch,
-// the last prefix is carried into prefix_carry, and the next step resumes.
-// Over the IM 0 bus pc is frozen so no wrap can be detected; the loop is
-// unbounded there, the same as the hardware.
-static void exec_ddfd_chain(z80* const z, uint8_t following,
-    uint16_t* const head_iz) {
-  uint16_t* iz = head_iz;
-  unsigned long prefixes = 1; // fetched so far, including the head
-  while (following == 0xDD || following == 0xFD) {
-    if (cyc_table_now(z)) z->cyc += z->timing->cyc_ddfd[following];
-    inc_r(z);
-    q_clear(z);
-    iz = (following == 0xDD) ? &z->ix : &z->iy;
-    if (++prefixes == 65536 && !z->im0_active) {
-      // Full wrap: every address held a prefix, so the run provably never
-      // ends. The extra charge pays the head's fetch (cyc_00 of a prefix
-      // is 0); the resume step takes it off again before running the
-      // terminating op, keeping split chains cycle-identical to unbroken
-      // ones.
-      if (cyc_table_now(z)) z->cyc += z->timing->cyc_ddfd[following];
-      z->prefix_carry = following;
-      return;
-    }
-    following = fetchb(z);
-  }
-  exec_opcode_ddfd(z, following, iz);
 }
 
 // executes a non-prefixed opcode
@@ -1465,7 +1510,7 @@ void exec_opcode(z80* const z, uint8_t opcode) {
   case 0xFB:
     z->iff1 = 1;
     z->iff2 = 1;
-    z->iff_delay = 1;
+    z->int_accept = Z80_ACCEPT_NMI_ONLY;
     break; // ei
   case 0x00: break; // nop
   case 0x76: z->halted = 1; break; // halt
@@ -1743,10 +1788,8 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     z->l_ = l;
   } break; // exx
 
-  case 0xCB: q_clear(z); exec_opcode_cb(z, fetchb(z)); break; // M1 prefix byte
-  case 0xED: q_clear(z); exec_opcode_ed(z, fetchb(z)); break; // M1 prefix byte
-  case 0xDD: q_clear(z); exec_ddfd_chain(z, fetchb(z), &z->ix); break; // M1 prefix byte
-  case 0xFD: q_clear(z); exec_ddfd_chain(z, fetchb(z), &z->iy); break; // M1 prefix byte
+  // Prefix bytes never reach this switch: the step dispatch decodes them
+  // one step at a time and only calls back here for plain opcodes.
 
   default: fprintf(stderr, "unknown opcode %02X\n", opcode); break;
   }
@@ -1915,14 +1958,8 @@ void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) {
     z->mem_ptr = val;
   } break; // ex (sp),iz
 
-  case 0xCB: {
-    uint16_t addr = IZD; // operand (d via nextb in IZD)
-    uint8_t op = nextb(z); // operand -- final op despite feeding
-                           // exec_opcode_dcb (a real Z80 reads it as non-M1)
-    // Two internal T sit between the op byte and the (iz+d) access.
-    internal_t_states(z, 2);
-    exec_opcode_dcb(z, op, addr);
-  } break;
+  // 0xCB never reaches this switch: the step dispatch turns DD/FD CB
+  // into the DDCB/FDCB tail step, which reads d and op itself.
 
   default: {
     // Any other FD/DD opcode behaves as a non-prefixed opcode. The R

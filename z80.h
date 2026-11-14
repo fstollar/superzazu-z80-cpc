@@ -66,6 +66,23 @@ typedef enum {
   Z80_IM0_READ = 1  // operand byte (normal memory read)
 } z80_im0_cycle_t;
 
+// Which prefix byte the next step decodes: NONE when no prefix is pending,
+// otherwise the prefix just fetched. Set by prefix steps, read back by the
+// next step's dispatch; cleared by z80_init.
+typedef enum {
+  Z80_PREFIX_NONE = 0, Z80_PREFIX_CB, Z80_PREFIX_ED,
+  Z80_PREFIX_DD, Z80_PREFIX_FD, Z80_PREFIX_DDCB, Z80_PREFIX_FDCB
+} z80_prefix_t;
+
+// Whether a step's end takes interrupts: ALL after an instruction, NMI only
+// right after EI, NONE after a prefix. Set by the step that just ran;
+// cleared to ALL by z80_init. Never touches IFF1 or IFF2.
+typedef enum {
+  Z80_ACCEPT_ALL = 0,
+  Z80_ACCEPT_NMI_ONLY = 1,
+  Z80_ACCEPT_NONE = 2
+} z80_accept_t;
+
 struct z80 {
   uint8_t (*read_byte)(void*, uint16_t, z80_read_kind_t);
   void (*write_byte)(void*, uint16_t, uint8_t);
@@ -163,9 +180,8 @@ struct z80 {
   // flags: sign, zero, yf, half-carry, xf, parity/overflow, negative, carry
   bool sf : 1, zf : 1, yf : 1, hf : 1, xf : 1, pf : 1, nf : 1, cf : 1;
 
-  // Set by EI: no interrupt is accepted at the boundary right after it.
-  // Cleared when z80_step() starts the next instruction.
-  uint8_t iff_delay;
+  uint8_t pending_prefix; // z80_prefix_t: how the next step decodes
+  uint8_t int_accept; // z80_accept_t: what the step end takes
   uint8_t interrupt_mode;
   uint8_t int_data;
   bool iff1 : 1, iff2 : 1;
@@ -178,12 +194,6 @@ struct z80 {
   // which latches Q for an IM0 acknowledge run there the same way.
   // Clear (the default): z80_step() checks at once, as before.
   bool int_check_by_host;
-  // A DD/FD prefix chain that wrapped all 64 KiB of memory: the step
-  // ended after 65536 prefixes with this set to the last prefix (0xDD or
-  // 0xFD), and the next step resumes the chain instead of fetching a new
-  // instruction. 0 while no chain is split across steps; cleared by
-  // z80_init. No interrupt is accepted while it is set.
-  uint8_t prefix_carry;
 };
 
 // One /IORQ or /WR strobe window of the running bus cycle, in half-T
