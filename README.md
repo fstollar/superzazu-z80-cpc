@@ -195,12 +195,17 @@ Tests complete
 *** reti iff test: OK
 *** stray prefix R test: OK
 *** long prefix chain test: OK
-*** full prefix chain test: OK
-*** split prefix chain test: OK
 *** im0 prefix chain test: OK
+*** per-prefix step test: OK
 *** q latch test: OK
 *** cyc source test: OK
 ```
+
+The full and split prefix chain tests from 13.22.22 are gone: every
+prefix byte is now its own step (see the per-prefix step test above),
+so there are no multi-prefix chunks left to run whole. Extra suites
+not in the default run stay available by name: `pushorder`,
+`im2order`, `hostcheck`, `hostequiv`, `strobe` and `ackcyc`.
 
 A second test, `z80_tstate_test.c`, checks bus-cycle timing: for every
 opcode it steps one instruction and compares the new T counter against
