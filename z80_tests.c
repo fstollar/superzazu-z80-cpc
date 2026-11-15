@@ -1019,6 +1019,8 @@ static int check_prefix_ldir(void) {
 
 // T4, DDCB: DD CB 05 46 costs 1, 1, 4 with R + 1, + 1, + 0. The third step
 // reads d and op as operands and the (IX+d) byte as data, with no M1.
+// The T counter pins the two internal T between the op and the data
+// access: 4 + 4 + 12 = 20, so dropping them reads 18 with cyc unchanged.
 static z80_read_kind_t ddcb_kinds[8];
 static int ddcb_kind_count;
 
@@ -1044,19 +1046,19 @@ static int check_prefix_ddcb(void) {
   int r = 0;
   z80_step(&z);
   if (z.pc != 1 || z.pending_prefix != Z80_PREFIX_DD || z.cyc != 1 ||
-      z.r != 0x11) {
-    printf("*** ERROR %s step 1: pc %04X pending %02X cyc %lu r %02X"
-        " (expected 0001 DD 1 11)\n", name, z.pc, z.pending_prefix, z.cyc,
-        z.r);
+      z.t_counter != 4 || z.r != 0x11) {
+    printf("*** ERROR %s step 1: pc %04X pending %02X cyc %lu t %lu r %02X"
+        " (expected 0001 DD 1 4 11)\n", name, z.pc, z.pending_prefix, z.cyc,
+        z.t_counter, z.r);
     r = 1;
   }
   r += check_accept_matches_prefix(name, "step 1", &z);
   z80_step(&z);
   if (z.pc != 2 || z.pending_prefix != Z80_PREFIX_DDCB || z.cyc != 2 ||
-      z.r != 0x12) {
-    printf("*** ERROR %s step 2: pc %04X pending %02X cyc %lu r %02X"
-        " (expected 0002 DDCB 2 12)\n", name, z.pc, z.pending_prefix, z.cyc,
-        z.r);
+      z.t_counter != 8 || z.r != 0x12) {
+    printf("*** ERROR %s step 2: pc %04X pending %02X cyc %lu t %lu r %02X"
+        " (expected 0002 DDCB 2 8 12)\n", name, z.pc, z.pending_prefix, z.cyc,
+        z.t_counter, z.r);
     r = 1;
   }
   r += check_accept_matches_prefix(name, "step 2", &z);
@@ -1064,10 +1066,10 @@ static int check_prefix_ddcb(void) {
   ddcb_kind_count = 0;
   z80_step(&z);
   if (z.pc != 4 || z.pending_prefix != Z80_PREFIX_NONE || z.cyc != 6 ||
-      z.r != 0x12 || z.zf != 0) {
-    printf("*** ERROR %s step 3: pc %04X pending %02X cyc %lu r %02X zf %d"
-        " (expected 0004 NONE 6 12 0)\n", name, z.pc, z.pending_prefix,
-        z.cyc, z.r, z.zf);
+      z.t_counter != 20 || z.r != 0x12 || z.zf != 0) {
+    printf("*** ERROR %s step 3: pc %04X pending %02X cyc %lu t %lu r %02X"
+        " zf %d (expected 0004 NONE 6 20 12 0)\n", name, z.pc,
+        z.pending_prefix, z.cyc, z.t_counter, z.r, z.zf);
     r = 1;
   }
   r += check_accept_matches_prefix(name, "step 3", &z);
@@ -1082,6 +1084,46 @@ static int check_prefix_ddcb(void) {
       printf("*** ERROR %s step 3: read %d is an M1 fetch\n", name, i);
       r = 1;
     }
+  }
+  return r;
+}
+
+// T4b, FDCB: FD CB 05 46 mirrors the DDCB step on IY -- 1, 1, 4 us with
+// R + 1, + 1, + 0, and the same two internal T, so 4 + 4 + 12 = 20 T.
+static int check_prefix_fdcb(void) {
+  const char* name = "FDCB step";
+  z80 z;
+  init_prefix_cpu(&z);
+  memory[0x0000] = 0xFD;
+  memory[0x0001] = 0xCB;
+  memory[0x0002] = 0x05; // d
+  memory[0x0003] = 0x46; // bit 0,(iy+5)
+  z.iy = 0x4000;
+  memory[0x4005] = 0x81;
+  int r = 0;
+  z80_step(&z);
+  if (z.pc != 1 || z.pending_prefix != Z80_PREFIX_FD || z.cyc != 1 ||
+      z.t_counter != 4 || z.r != 0x11) {
+    printf("*** ERROR %s step 1: pc %04X pending %02X cyc %lu t %lu r %02X"
+        " (expected 0001 FD 1 4 11)\n", name, z.pc, z.pending_prefix, z.cyc,
+        z.t_counter, z.r);
+    r = 1;
+  }
+  z80_step(&z);
+  if (z.pc != 2 || z.pending_prefix != Z80_PREFIX_FDCB || z.cyc != 2 ||
+      z.t_counter != 8 || z.r != 0x12) {
+    printf("*** ERROR %s step 2: pc %04X pending %02X cyc %lu t %lu r %02X"
+        " (expected 0002 FDCB 2 8 12)\n", name, z.pc, z.pending_prefix, z.cyc,
+        z.t_counter, z.r);
+    r = 1;
+  }
+  z80_step(&z);
+  if (z.pc != 4 || z.pending_prefix != Z80_PREFIX_NONE || z.cyc != 6 ||
+      z.t_counter != 20 || z.r != 0x12 || z.zf != 0) {
+    printf("*** ERROR %s step 3: pc %04X pending %02X cyc %lu t %lu r %02X"
+        " zf %d (expected 0004 NONE 6 20 12 0)\n", name, z.pc,
+        z.pending_prefix, z.cyc, z.t_counter, z.r, z.zf);
+    r = 1;
   }
   return r;
 }
@@ -1425,6 +1467,7 @@ static int run_prefix_step_test(void) {
   r += check_prefix_cb();
   r += check_prefix_ldir();
   r += check_prefix_ddcb();
+  r += check_prefix_fdcb();
   r += check_prefix_dd_ed();
   r += check_prefix_ed_dd();
   r += check_prefix_int();
@@ -3102,6 +3145,15 @@ int main(int argc, char** argv) {
   // with no argument, all three run sequentially as upstream's ./z80_tests did.
   const char* which = argc > 1 ? argv[1] : NULL;
   int r = 0;
+  if (which && strcmp(which, "prelim") != 0 && strcmp(which, "zexdoc") != 0 &&
+      strcmp(which, "zexall") != 0) {
+    // Every named suite returns above; down here only the three rom
+    // exercisers are valid, so an unknown name must fail loudly instead
+    // of running nothing and exiting 0.
+    fprintf(stderr, "unknown suite: %s (expected prelim, zexdoc or zexall)\n", which);
+    free(memory);
+    return 1;
+  }
   if (!which || strcmp(which, "prelim") == 0)
     r += run_test(&cpu, "roms/prelim.com", 8721LU);
   if (!which || strcmp(which, "zexdoc") == 0)

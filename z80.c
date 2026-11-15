@@ -937,7 +937,10 @@ static inline void process_interrupts(z80* const z) {
   // is not accepted until after the instruction following EI is executed."
   // EI sets NMI_ONLY for the whole boundary after it, however often the
   // host checks it (z80_check_interrupt()); the next step's entry sets
-  // ALL again when its own instruction runs.
+  // ALL again when its own instruction runs. Whether NMI is really
+  // accepted right after EI is unsourced -- that is a hardware question
+  // (Young's z80-documented only says no interrupts are accepted right
+  // after EI or DI).
   if (z->int_accept == Z80_ACCEPT_NMI_ONLY) {
     return;
   }
@@ -970,7 +973,10 @@ static inline void process_interrupts(z80* const z) {
       q_clear(z);
       // The bus byte runs the same prefix logic as a fetched byte: a
       // prefix leaves its state pending and the bus active for the
-      // follow-on steps, anything else runs at once.
+      // follow-on steps, anything else runs at once. A prefix vector is
+      // unreachable on the board (the classic vector is 0xFF, the Plus
+      // vector even, so neither is a prefix byte); only a host-driven bus
+      // like the chainim0 test stages one.
       if (z->int_data == 0xCB)
         take_prefix(z, Z80_PREFIX_CB);
       else if (z->int_data == 0xED)

@@ -201,7 +201,7 @@ Tests complete
 *** cyc source test: OK
 ```
 
-The full and split prefix chain tests from 13.22.22 are gone: every
+The full and split prefix chain tests are gone: every
 prefix byte is now its own step (see the per-prefix step test above),
 so there are no multi-prefix chunks left to run whole. Extra suites
 not in the default run stay available by name: `pushorder`,
