@@ -193,8 +193,9 @@ instruction ends up on a genuinely hot path.
   RST costs what IM 1 costs (5 µs, 4 µs after a 4-class instruction --
   Young ch.5 gives 13 T for both, UM0080 p.19 "two more than the normal
   number"). An injected CALL nn costs 6 µs (5 µs after a 4-class
-  instruction); a further INTA after a prefix is one more bus cycle in
-  the span. On the table source the old rule stays (the fetched
+  instruction); a further INTA after a prefix is one more bus cycle,
+  charged by the follow-on step from its own sampled slots, adjacent to
+  the acknowledge step's span. On the table source the old rule stays (the fetched
   instruction's own cost + 1 µs, +1 µs per further INTA). The per-extra-
   INTA 1 µs is derived from the Z80's 2 wait states per INTA cycle
   (Zilog UM0080; redcode/Z80), not measured: it is unverified on a CPC,

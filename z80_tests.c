@@ -3060,6 +3060,50 @@ static int check_ack_hold(int mode, uint8_t data, unsigned long expected) {
   return 0;
 }
 
+// IM 0 with a prefixed injection: the CB byte is the first INTA, the
+// follow-on byte (SET 0,(HL), 0xC6) a further one from the host bus. A
+// host hold during the follow-on write must land in the step total, and
+// the follow-on step latches the derived-source decision like any other.
+static uint8_t im0_followon_byte(z80* const z, uint16_t pc, z80_im0_cycle_t kind) {
+  (void)z;
+  (void)pc;
+  return kind == Z80_IM0_INTA ? 0xC6 : 0;
+}
+
+static int check_im0_followon(const char* name, int hold, unsigned long exp_cyc,
+    unsigned long exp_t) {
+  z80 z;
+  init_ack_cpu(&z);
+  z.write_byte = wb_hold_once;
+  z.im0_bus = im0_followon_byte;
+  z.userdata = &z;
+  z80_set_timing(&z, &z80_timing_cpc);
+  z80_set_cyc_source(&z, Z80_CYC_FROM_WAIT_SLOTS);
+  z.periodic_wait_mask = 0xD;
+  z.interrupt_mode = 0;
+  z.h = 0x40;
+  z.l = 0;
+  hold_added = hold ? 0 : 1; // 1: the callback adds no hold
+  z80_gen_int(&z, 0xCB);
+  int steps = 0;
+  do {
+    z80_step(&z);
+    steps += 1;
+  } while ((z.im0_active || z.pending_prefix != Z80_PREFIX_NONE) && steps < 5);
+  int r = 0;
+  if (exp_cyc != 0 && (z.cyc != exp_cyc || z.t_counter != exp_t)) {
+    printf("*** ERROR %s: cyc %lu t %lu (expected %lu %lu)\n",
+        name, z.cyc, z.t_counter, exp_cyc, exp_t);
+    r = 1;
+  }
+  if (z.cyc_derived_step != 1) {
+    printf("*** ERROR %s: cyc_derived_step %u after the follow-on step (want 1)\n",
+        name, z.cyc_derived_step);
+    r = 1;
+  }
+  return r;
+}
+
 static int run_ackcyc_test(void) {
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
@@ -3091,6 +3135,8 @@ static int run_ackcyc_test(void) {
   mismatches += check_ack_span("incbc im0 call", 0, 0, 0x03, 0xCD, 7, 0x0000, 0, 0xD);
   mismatches += check_ack_span("nop im0 cb", 0, 0, 0x00, 0xCB, 5, 0x0001, 0, 0xD);
   mismatches += check_ack_span("incbc im0 cb", 0, 0, 0x03, 0xCB, 5, 0x0001, 0, 0xD);
+  mismatches += check_im0_followon("im0 cb c6 hold", 1, 8, 31);
+  mismatches += check_im0_followon("im0 cb c6", 0, 0, 0);
   mismatches += check_ack_hold(1, 0xFF, 7);
   mismatches += check_ack_hold(0, 0xFF, 7);
   mismatches += check_ack_mask_change();

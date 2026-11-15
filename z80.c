@@ -207,7 +207,7 @@ static inline uint8_t fetchb(z80* const z) {
     // IM 0: a follow-on opcode byte after a prefix is another full INTA
     // cycle -- no PC increment. It runs no host memory callback; on the
     // table source it still adds the acknowledge overhead, on the
-    // sampled-slots source the span below covers it.
+    // sampled-slots source the follow-on step's own span covers it.
     inta(z);
     if (cyc_table_now(z)) z->cyc += z->timing->int_ack_im0;
     return z->im0_bus ? z->im0_bus(z, z->pc, Z80_IM0_INTA) : 0xFF;
@@ -890,7 +890,8 @@ static inline void process_interrupts(z80* const z) {
   // An acknowledge is charged like a step, from the slot the next opcode
   // fetch would have sampled to the slot after the acknowledge. The start
   // slot is recorded up front so the end charge below spans the whole
-  // acknowledge, IM 0's injected instruction included. Both ends use the
+  // acknowledge, IM 0's injected instruction included (a prefixed one's
+  // follow-on steps charge their own spans). Both ends use the
   // free phase read from the live mask here, at acknowledge entry, not
   // the phase the step latched, so a callback that changed the mask
   // during the step moves the acknowledge with it. Each accepted
@@ -969,7 +970,8 @@ static inline void process_interrupts(z80* const z) {
       // The INTA cycle and the off-bus bytes run with no host memory
       // callback; the INTA cycle runs the acknowledge hook below. On the
       // sampled-slots source the span below covers the whole acknowledge,
-      // injected instruction included.
+      // injected instruction included, up to the first prefix byte; the
+      // follow-on steps charge their own spans.
       inta(z);
       if (z->int_ack)
         z->int_ack(z);
@@ -1165,10 +1167,14 @@ void z80_step(z80* const z) {
   // halted path no fetch runs; the slot is the one the fetch would have used.
   // The mode is latched here for the whole step (cyc_derived_step): the
   // charge sites below read the latch, so they agree with this span even
-  // if a callback changes the mask or source mid-step. A follow-on step
-  // off the IM 0 bus keeps the table: the entry excludes im0_active, so
-  // it never adds a derived span on top of the acknowledge's own span.
-  const bool derived_now = cyc_derived_now(z) && !z->im0_active;
+  // if a callback changes the mask or source mid-step. The follow-on step
+  // of a prefixed IM 0 instruction is charged from its own sampled slots
+  // like any other step. On the per-prefix-step core the acknowledge
+  // step's span and the follow-on step's span are adjacent: the first
+  // INTA ends one T before a free slot, so the follow-on step starts at
+  // the slot where the acknowledge ended, and the two spans sum to the
+  // whole instruction's span.
+  const bool derived_now = cyc_derived_now(z);
   z->cyc_derived_step = derived_now;
   const unsigned free_phase = derived_now ? wait_free_phase(z->periodic_wait_mask) : 0;
   // The step's M1 sample slot: the first slot at or after one T past the
