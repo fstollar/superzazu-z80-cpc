@@ -379,12 +379,17 @@ static int run_blockxy_test(void) {
       0x4000, 0x00, 0x2000, 0x24);
   r += check_blockxy("ldir repeat xy11", ldir, 0x2800, 0x00, 2, 0x5000,
       0x4000, 0x00, 0x2800, 0x2C);
-  // LDIR last (BC reaches 0): the LDI formula stands, here X/Y = 1/1.
-  r += check_blockxy("ldir last", ldir, 0x2800, 0xFF, 1, 0x5000, 0x4000,
-      0xFF, 0x2802, 0x28);
-  // LDDR repeat overrides the same way; LDDR last keeps the formula.
+  // LDIR last (BC reaches 0): the LDI formula stands. A = (HL) = 00 gives
+  // formula X/Y = 0/0 while the PC rule at 0x2800 would give 1/1.
+  r += check_blockxy("ldir last", ldir, 0x2800, 0x00, 1, 0x5000, 0x4000,
+      0x00, 0x2802, 0x00);
+  // LDDR repeat overrides the same way; LDDR last keeps the formula. The
+  // 0x0000 repeat uses A = (HL) = FF so the formula reads 1/1 against the
+  // PC rule's 0/0.
   r += check_blockxy("lddr repeat xy11", lddr, 0x2800, 0x00, 2, 0x5000,
       0x4000, 0x00, 0x2800, 0x2C);
+  r += check_blockxy("lddr repeat xy00", lddr, 0x0000, 0xFF, 2, 0x5000,
+      0x4000, 0xFF, 0x0000, 0x04);
   r += check_blockxy("lddr last", lddr, 0x0000, 0xFF, 1, 0x5000, 0x4000,
       0xFF, 0x0002, 0x28);
   // CPIR repeats: A = 01 over (HL) = 00 misses with formula X/Y = 0/0;
@@ -402,13 +407,27 @@ static int run_blockxy_test(void) {
   r += check_blockxy("cpir last match", cpir, 0x0000, 0x05, 2, 0, 0x4000,
       0x05, 0x0002, 0x46);
   // CPDR repeat overrides the same way; CPDR last by BC or match keeps
-  // the formula.
+  // the formula. The 0x0000 repeat uses A = 00 over (HL) = F7 so the
+  // formula reads 1/0 against the PC rule's 0/0; the last-bc case uses
+  // A = 08 over (HL) = 00 so the formula reads 1/0 (F 0x0A) against the
+  // PC rule's 0/0 (F 0x02). The last-match case at 0x0000 cannot differ:
+  // a match forces result 0 with no half-borrow, so the formula is 0/0
+  // exactly like the PC rule there.
   r += check_blockxy("cpdr repeat xy11", cpdr, 0x2800, 0x01, 2, 0, 0x4000,
       0x00, 0x2800, 0x2E);
-  r += check_blockxy("cpdr last bc", cpdr, 0x0000, 0x01, 1, 0, 0x4000,
-      0x00, 0x0002, 0x02);
+  r += check_blockxy("cpdr repeat xy00", cpdr, 0x0000, 0x00, 2, 0, 0x4000,
+      0xF7, 0x0000, 0x16);
+  r += check_blockxy("cpdr last bc", cpdr, 0x0000, 0x08, 1, 0, 0x4000,
+      0x00, 0x0002, 0x0A);
   r += check_blockxy("cpdr last match", cpdr, 0x2800, 0x05, 2, 0, 0x4000,
       0x05, 0x2802, 0x46);
+  // At 0x07FE the pre-rewind PC is 0x0800, so X/Y from PC+2 would read 1/0.
+  r += check_blockxy("ldir repeat 07fe", ldir, 0x07FE, 0x00, 2, 0x5000,
+      0x4000, 0x00, 0x07FE, 0x04);
+  // At 0x27FF MEMPTR lands on 0x2800, so X/Y from PC+1 (MEMPTR) would
+  // read 1/1.
+  r += check_blockxy("ldir repeat 27ff", ldir, 0x27FF, 0x00, 2, 0x5000,
+      0x4000, 0x00, 0x27FF, 0x24);
   printf("*** block x/y test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);
   return r != 0;
