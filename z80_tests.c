@@ -406,6 +406,10 @@ static int run_blockxy_test(void) {
       0x00, 0x2802, 0x02);
   r += check_blockxy("cpir last match", cpir, 0x0000, 0x05, 2, 0, 0x4000,
       0x05, 0x0002, 0x46);
+  // The same match at 0x2800: the formula still gives X/Y 0/0, while
+  // reading bits 11/13 of the PC on this last iteration would give 1/1.
+  r += check_blockxy("cpir last match 2800", cpir, 0x2800, 0x05, 2, 0, 0x4000,
+      0x05, 0x2802, 0x46);
   // CPDR repeat overrides the same way; CPDR last by BC or match keeps
   // the formula. The 0x0000 repeat uses A = 00 over (HL) = F7 so the
   // formula reads 1/0 against the PC rule's 0/0; the last-bc case uses
