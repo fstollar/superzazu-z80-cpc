@@ -92,7 +92,9 @@ struct z80 {
   // interrupt (not NMI): called once the cycle has opened, so
   // bus_cycle_start is its first T and wait_sample_t its clear WAIT
   // sample slot, and before the core uses int_data, so a host can supply
-  // the acknowledged byte here. NULL (the default) skips the call.
+  // the acknowledged byte here. NULL (the default) skips the call. In
+  // mode 2 the core keeps the byte present when the hook returns; a
+  // device raising after that does not change the acknowledged interrupt.
   void (*int_ack)(z80*);
   // During an IM 0 instruction, supplies every byte after the first (which
   // comes from z80_gen_int). Z80_IM0_INTA is a follow-on opcode byte after a

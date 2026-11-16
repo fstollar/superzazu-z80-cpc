@@ -1032,6 +1032,12 @@ static inline void process_interrupts(z80* const z) {
       inta(z);
       if (z->int_ack)
         z->int_ack(z);
+      // The vector byte is on the data bus only for the acknowledge
+      // cycle, so latch the byte the hook leaves: a device raising later
+      // in the acknowledge must not change the vector of the interrupt
+      // already taken. The pushes and the vector-table reads below keep
+      // their cycles; only which byte forms the table address is fixed.
+      const uint8_t ack_data = z->int_data;
       internal_t_states(z, 1);
       if (!ack_derived)
         z->cyc += z->timing->int_ack_im2;
@@ -1039,7 +1045,7 @@ static inline void process_interrupts(z80* const z) {
       // The jump address's high byte comes from the next address with
       // a 16-bit carry, as the other emulators do: vector byte 0xFF
       // reads (I+1):00, not I:00. Not confirmed on hardware.
-      const uint16_t addr_lo = (uint16_t)(z->i << 8) | z->int_data;
+      const uint16_t addr_lo = (uint16_t)(z->i << 8) | ack_data;
       const uint16_t addr_hi = (uint16_t)(addr_lo + 1);
       // im2_vector -- the two IM2 vector-table reads. Low byte
       // first, as the Z80 bus does, sequenced explicitly: the old single

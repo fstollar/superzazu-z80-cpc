@@ -2087,6 +2087,71 @@ static int run_im2order_test(void) {
   return r != 0;
 }
 
+// MARK: IM2 vector byte latched at INTA
+// The peripheral puts the vector byte on the data bus in response to the
+// acknowledge, so only the byte present at the acknowledge counts: a
+// device raising later in the acknowledge must not change the vector of
+// the interrupt already taken. Staged here with three bytes: one pending
+// before the step, one supplied by the host in the acknowledge hook (as
+// the int_ack contract allows), and one raised from the first push write
+// (the late raise the machine's DMA executor models). The latched byte is
+// the hook's; without the latch the late raise wins, and latching before
+// the hook loses the host-supplied byte.
+static int im2latch_fired;
+
+static void im2latch_ack(z80* z) {
+  z80_gen_int(z, 0x30);
+}
+
+static void im2latch_wb(void* userdata, uint16_t addr, uint8_t val) {
+  z80* const z = (z80*)userdata;
+  if (!im2latch_fired) {
+    im2latch_fired = 1;
+    z80_gen_int(z, 0xFF);
+  }
+  memory[addr] = val;
+}
+
+static int run_im2latch_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  z80 z;
+  z80_init(&z);
+  z.read_byte = rb;
+  z.write_byte = im2latch_wb;
+  z.port_in = in;
+  z.port_out = out;
+  z.userdata = &z;
+  z.int_ack = im2latch_ack;
+  memset(memory, 0, MEMORY_SIZE); // NOPs everywhere
+  z.pc = 0;
+  z.sp = 0xF000;
+  z.interrupt_mode = 2;
+  z.iff1 = 1;
+  z.iff2 = 1;
+  z.i = 0x10;
+  memory[0x1030] = 0x34; // the hook's byte vectors to 0x1234
+  memory[0x1031] = 0x12;
+  memory[0x1020] = 0x78; // the pre-step byte would vector to 0x5678
+  memory[0x1021] = 0x56;
+  memory[0x10FF] = 0xBC; // the late raise would vector to 0x9ABC
+  memory[0x1100] = 0x9A;
+  im2latch_fired = 0;
+  z80_gen_int(&z, 0x20);
+  z80_step(&z);
+  int r = 0;
+  if (z.pc != 0x1234 || z.sp != 0xEFFE || pushed_return(&z) != 0x0001) {
+    printf("*** ERROR im2 latch: pc %04X sp %04X pushed %04X"
+        " (expected 1234 EFFE 0001)\n", z.pc, z.sp, pushed_return(&z));
+    r = 1;
+  }
+  printf("*** im2 latch test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: derived cycle-count source
 // With the source off (the default) the table charges are unchanged; with
 // it on and a WAIT mask with exactly one free phase, one step charges the
@@ -3227,6 +3292,9 @@ int main(int argc, char** argv) {
   }
   if (argc > 1 && strcmp(argv[1], "im2order") == 0) {
     return run_im2order_test();
+  }
+  if (argc > 1 && strcmp(argv[1], "im2latch") == 0) {
+    return run_im2latch_test();
   }
   if (argc > 1 && strcmp(argv[1], "hostcheck") == 0) {
     return run_hostcheck_test();
