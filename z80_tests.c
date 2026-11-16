@@ -304,6 +304,116 @@ static int run_memptr_test(void) {
   return r != 0;
 }
 
+// MARK: block-instruction repeat X/Y flags
+// pack_qf/seed_qf live with the Q-latch suite further down; declared here
+// so this suite can seed F and read it back as a byte.
+static uint8_t pack_qf(const z80* const z);
+static void seed_qf(z80* const z, uint8_t f);
+// Runs one step of a block instruction at `addr` and checks the full F
+// byte. On a repeating iteration (BC - 1 != 0, and no match for CPIR/CPDR)
+// X/Y come from the rewound PC: bit 11 feeds X, bit 13 feeds Y, where the
+// PC points back at the ED byte. The last iteration (BC reaches 0, or a
+// match) keeps the LDI/CPI formula. Everything besides X/Y is what
+// ldi()/cpi() compute: S/Z/C keep their seeded value, H and N are cleared
+// (LDI) or come from the subtraction (CPI), PV is set while BC is nonzero
+// afterwards. F is seeded with 0 so an untouched flag reads back 0.
+static int check_blockxy(const char* name, const uint8_t* code, uint16_t addr,
+    uint8_t a, uint16_t bc, uint16_t de, uint16_t hl,
+    uint8_t at_hl, uint16_t expected_pc, uint8_t expected_f) {
+  z80 z;
+  z80_init(&z);
+  z.read_byte = rb;
+  z.write_byte = wb;
+  z.port_in = in;
+  z.port_out = out;
+  memset(memory, 0, MEMORY_SIZE);
+  memcpy(&memory[addr], code, 2);
+  memory[hl] = at_hl;
+  z.pc = addr;
+  z.a = a;
+  z.b = (uint8_t)(bc >> 8);
+  z.c = (uint8_t)(bc & 0xFF);
+  z.d = (uint8_t)(de >> 8);
+  z.e = (uint8_t)(de & 0xFF);
+  z.h = (uint8_t)(hl >> 8);
+  z.l = (uint8_t)(hl & 0xFF);
+  seed_qf(&z, 0);
+  // Prefix bytes are their own steps; run to the end of the instruction.
+  // (A repeat rewinds the pc and finishes in the same opcode step, so the
+  // loop ends with pending NONE there too.)
+  do {
+    z80_step(&z);
+  } while (z.pending_prefix != Z80_PREFIX_NONE);
+  int failed = 0;
+  if (z.pc != expected_pc) {
+    printf("*** ERROR %s: PC %04X (expected %04X)\n", name, z.pc,
+        expected_pc);
+    failed = 1;
+  }
+  const uint8_t f = pack_qf(&z);
+  if (f != expected_f) {
+    printf("*** ERROR %s: F %02X (expected %02X)\n", name, f, expected_f);
+    failed = 1;
+  }
+  return failed;
+}
+
+static int run_blockxy_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  static const uint8_t ldir[] = {0xED, 0xB0};
+  static const uint8_t lddr[] = {0xED, 0xB8};
+  static const uint8_t cpir[] = {0xED, 0xB1};
+  static const uint8_t cpdr[] = {0xED, 0xB9};
+  int r = 0;
+  // LDIR repeats: the LDI formula gives X = bit 3 and Y = bit 1 of
+  // (HL) + A, which the PC rule overrides. A = (HL) = FF makes the
+  // formula read 1/1, A = (HL) = 00 makes it read 0/0.
+  r += check_blockxy("ldir repeat xy00", ldir, 0x0000, 0xFF, 2, 0x5000,
+      0x4000, 0xFF, 0x0000, 0x04);
+  r += check_blockxy("ldir repeat xy10", ldir, 0x0800, 0x00, 2, 0x5000,
+      0x4000, 0x00, 0x0800, 0x0C);
+  r += check_blockxy("ldir repeat xy01", ldir, 0x2000, 0x00, 2, 0x5000,
+      0x4000, 0x00, 0x2000, 0x24);
+  r += check_blockxy("ldir repeat xy11", ldir, 0x2800, 0x00, 2, 0x5000,
+      0x4000, 0x00, 0x2800, 0x2C);
+  // LDIR last (BC reaches 0): the LDI formula stands, here X/Y = 1/1.
+  r += check_blockxy("ldir last", ldir, 0x2800, 0xFF, 1, 0x5000, 0x4000,
+      0xFF, 0x2802, 0x28);
+  // LDDR repeat overrides the same way; LDDR last keeps the formula.
+  r += check_blockxy("lddr repeat xy11", lddr, 0x2800, 0x00, 2, 0x5000,
+      0x4000, 0x00, 0x2800, 0x2C);
+  r += check_blockxy("lddr last", lddr, 0x0000, 0xFF, 1, 0x5000, 0x4000,
+      0xFF, 0x0002, 0x28);
+  // CPIR repeats: A = 01 over (HL) = 00 misses with formula X/Y = 0/0;
+  // A = 00 over (HL) = F7 misses with formula X/Y = 1/0 (the subtraction
+  // half-borrows, and X/Y read result - H). N, PV and the half-borrow stay
+  // set, the rest is 0.
+  r += check_blockxy("cpir repeat xy11", cpir, 0x2800, 0x01, 2, 0, 0x4000,
+      0x00, 0x2800, 0x2E);
+  r += check_blockxy("cpir repeat xy00", cpir, 0x0000, 0x00, 2, 0, 0x4000,
+      0xF7, 0x0000, 0x16);
+  // CPIR last by BC or by match: the CPI formula stands (here 0/0), PV
+  // stays set on a match while BC is still nonzero afterwards.
+  r += check_blockxy("cpir last bc", cpir, 0x2800, 0x01, 1, 0, 0x4000,
+      0x00, 0x2802, 0x02);
+  r += check_blockxy("cpir last match", cpir, 0x0000, 0x05, 2, 0, 0x4000,
+      0x05, 0x0002, 0x46);
+  // CPDR repeat overrides the same way; CPDR last by BC or match keeps
+  // the formula.
+  r += check_blockxy("cpdr repeat xy11", cpdr, 0x2800, 0x01, 2, 0, 0x4000,
+      0x00, 0x2800, 0x2E);
+  r += check_blockxy("cpdr last bc", cpdr, 0x0000, 0x01, 1, 0, 0x4000,
+      0x00, 0x0002, 0x02);
+  r += check_blockxy("cpdr last match", cpdr, 0x2800, 0x05, 2, 0, 0x4000,
+      0x05, 0x2802, 0x46);
+  printf("*** block x/y test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: interrupt after EI
 // No interrupt is accepted at the boundary right after EI, only after the
 // instruction that follows it (z80-documented section 5.5). A host that
@@ -3201,6 +3311,9 @@ int main(int argc, char** argv) {
   if (argc > 1 && strcmp(argv[1], "memptr") == 0) {
     return run_memptr_test();
   }
+  if (argc > 1 && strcmp(argv[1], "blockxy") == 0) {
+    return run_blockxy_test();
+  }
   if (argc > 1 && strcmp(argv[1], "eidelay") == 0) {
     return run_ei_delay_test();
   }
@@ -3280,6 +3393,7 @@ int main(int argc, char** argv) {
     r += run_outi_port_test();
     r += run_ini_memptr_test();
     r += run_memptr_test();
+    r += run_blockxy_test();
     r += run_ei_delay_test();
     r += run_reti_iff_test();
     r += run_stray_r_test();

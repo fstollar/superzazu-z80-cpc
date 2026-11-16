@@ -2179,6 +2179,10 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
 
     if (get_bc(z) != 0) {
       z->pc -= 2;
+      // A repeating iteration reports X/Y from the rewound PC (bit 11
+      // feeds X, bit 13 feeds Y), not the LDI formula.
+      z->xf = GET_BIT(11, z->pc);
+      z->yf = GET_BIT(13, z->pc);
       if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
@@ -2191,6 +2195,10 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
 
     if (get_bc(z) != 0) {
       z->pc -= 2;
+      // A repeating iteration reports X/Y from the rewound PC (bit 11
+      // feeds X, bit 13 feeds Y), not the LDI formula.
+      z->xf = GET_BIT(11, z->pc);
+      z->yf = GET_BIT(13, z->pc);
       if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
@@ -2203,6 +2211,10 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     cpi(z);
     if (get_bc(z) != 0 && !z->zf) {
       z->pc -= 2;
+      // A repeating iteration reports X/Y from the rewound PC (bit 11
+      // feeds X, bit 13 feeds Y), not the CPI formula.
+      z->xf = GET_BIT(11, z->pc);
+      z->yf = GET_BIT(13, z->pc);
       if (cyc_table_now(z)) z->cyc += z->timing->cpir_cpdr_repeat_extra;
       internal_t_states(z, z80_timing_generic.cpir_cpdr_repeat_extra);
       z->mem_ptr = z->pc + 1;
@@ -2212,6 +2224,10 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     cpd(z);
     if (get_bc(z) != 0 && !z->zf) {
       z->pc -= 2;
+      // A repeating iteration reports X/Y from the rewound PC (bit 11
+      // feeds X, bit 13 feeds Y), not the CPI formula.
+      z->xf = GET_BIT(11, z->pc);
+      z->yf = GET_BIT(13, z->pc);
       if (cyc_table_now(z)) z->cyc += z->timing->cpir_cpdr_repeat_extra;
       internal_t_states(z, z80_timing_generic.cpir_cpdr_repeat_extra);
       z->mem_ptr = z->pc + 1;
