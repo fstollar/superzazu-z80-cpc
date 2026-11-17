@@ -979,6 +979,7 @@ static inline void process_interrupts(z80* const z) {
     z->iff1 = 0;
     z->int_accept = Z80_ACCEPT_ALL;
     q_clear(z);
+    z->ld_a_ir_late_pv = 0;
     inc_r(z);
 
     // The acknowledge M1 answers with no bus callback of its own; call()
@@ -1018,6 +1019,13 @@ static inline void process_interrupts(z80* const z) {
     // accepting the interrupt drops the running instruction's flag
     // state; the call (or the IM 0 instruction below) latches Q itself.
     q_clear(z);
+    // NMOS: LD A,I / LD A,R copy IFF2 into P/V only after an interrupt
+    // acceptance at their end has cleared IFF2, so an accepted maskable
+    // interrupt leaves P/V = 0 (Zilog Z80 Family Q&A). NMI leaves IFF2
+    // alone, so it leaves P/V alone. Fixed on later parts.
+    if (z->ld_a_ir_late_pv && z->nmos_ld_a_ir_bug)
+      z->pf = 0;
+    z->ld_a_ir_late_pv = 0;
 
     switch (z->interrupt_mode) {
     case 0:
@@ -1156,6 +1164,8 @@ void z80_init(z80* const z) {
   z->mem_ptr = 0;
   z->q = 0;
   z->flags_written = 0;
+  z->ld_a_ir_late_pv = 0;
+  z->nmos_ld_a_ir_bug = 1;
 
   // af and sp are set to 0xFFFF after reset,
   // and the other values are undefined (z80-documented)
@@ -1221,6 +1231,7 @@ z80_strobe_window_t z80_write_window(const z80* const z) {
 void z80_step(z80* const z) {
   z->int_accept = Z80_ACCEPT_ALL;
   z->flags_written = 0;
+  z->ld_a_ir_late_pv = 0;
   // When deriving the cycle count from the WAIT-sampled slots, the charge
   // spans from the step's own M1 sample slot to the next step's. On the
   // halted path no fetch runs; the slot is the one the fetch would have used.
@@ -2202,6 +2213,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     z->nf = 0;
     z->pf = z->iff2;
     z->flags_written = 1;
+    z->ld_a_ir_late_pv = 1;
     break; // ld a,i
 
   case 0x5F:
@@ -2215,6 +2227,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     z->nf = 0;
     z->pf = z->iff2;
     z->flags_written = 1;
+    z->ld_a_ir_late_pv = 1;
     break; // ld a,r
 
   case 0x45:

@@ -179,6 +179,11 @@ struct z80 {
   // after the acceptance has cleared IFF2. Later parts copy IFF2 before
   // the acceptance clears it, so they leave P/V alone.
   bool nmos_ld_a_ir_bug; // configuration: 1 models the NMOS behaviour
+  // Set by LD A,I and LD A,R: their P/V copy of IFF2 lands after an
+  // interrupt acceptance at the step's end, so an accepted maskable
+  // interrupt leaves P/V cleared. Every step entry clears it, so only
+  // the step that ran one of the two keeps it set.
+  uint8_t ld_a_ir_late_pv; // internal
   uint8_t a, b, c, d, e, h, l; // main registers
   uint8_t a_, b_, c_, d_, e_, h_, l_, f_; // alternate registers
   uint8_t i, r; // interrupt vector, memory refresh
