@@ -174,6 +174,11 @@ struct z80 {
   // interrupt; POP AF and EX AF,AF' change F without latching it.
   uint8_t q;
   uint8_t flags_written; // internal: set when the running step writes the flags
+  // Whether LD A,I and LD A,R leave P/V cleared when a maskable
+  // interrupt is accepted at their end: the late P/V copy of IFF2 lands
+  // after the acceptance has cleared IFF2. Later parts copy IFF2 before
+  // the acceptance clears it, so they leave P/V alone.
+  bool nmos_ld_a_ir_bug; // configuration: 1 models the NMOS behaviour
   uint8_t a, b, c, d, e, h, l; // main registers
   uint8_t a_, b_, c_, d_, e_, h_, l_, f_; // alternate registers
   uint8_t i, r; // interrupt vector, memory refresh

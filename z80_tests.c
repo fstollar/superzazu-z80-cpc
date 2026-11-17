@@ -2138,6 +2138,398 @@ static int run_qlatch_test(void) {
   return r != 0;
 }
 
+// MARK: NMOS LD A,I / LD A,R P/V bug
+// On the NMOS part LD A,I and LD A,R copy IFF2 into P/V only after an
+// interrupt acceptance at their end has cleared IFF2, so an accepted
+// maskable interrupt leaves P/V = 0. Nothing else changes: an interrupt
+// that is merely pending, an NMI, or any later instruction leaves the
+// copied IFF2 alone.
+static void init_ldair_cpu(z80* const z) {
+  init_ei_cpu(z);
+  z->iff1 = 1;
+  z->iff2 = 1;
+  z->i = 0x80;
+  seed_qf(z, 0x01); // C is kept through LD A,I/R; P/V is seeded clear
+}
+
+// LD A,I with an INT accepted at its end: taken to 0x38 with return
+// 0x0002, A reads I, and P/V is clear although IFF2 was set.
+static int check_ldair_int_taken(void) {
+  const char* name = "ld a,i with int accepted";
+  z80 z;
+  init_ldair_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z); // ED prefix step: the interrupt stays held
+  z80_step(&z); // ld a,i: taken at its end
+  int r = expect_taken(name, &z, 0x0002);
+  if (z.a != 0x80 || pack_qf(&z) != 0x81 || z.q != 0) {
+    printf("*** ERROR %s: a %02X q %02X f %02X (expected 80 00 81)\n",
+        name, z.a, z.q, pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// The control: without an interrupt LD A,I copies the set IFF2, so P/V
+// stays set (S = 1 from A, C kept).
+static int check_ldair_no_int(void) {
+  const char* name = "ld a,i without int";
+  z80 z;
+  init_ldair_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_step(&z);
+  z80_step(&z);
+  if (z.pc != 0x0002 || z.int_pending || z.a != 0x80 ||
+      pack_qf(&z) != 0x85) {
+    printf("*** ERROR %s: pc %04X pending %d a %02X f %02X"
+        " (expected 0002 0 80 85)\n", name, z.pc, z.int_pending, z.a,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// The host path: the step ends first and the host takes the interrupt
+// afterwards with z80_check_interrupt(). P/V is still cleared, so the
+// rule lives at acceptance, not at instruction end.
+static int check_ldair_host_check(void) {
+  const char* name = "ld a,i with host-side accept";
+  z80 z;
+  init_ldair_cpu(&z);
+  z.int_check_by_host = 1;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_step(&z); // ED prefix step
+  z80_check_interrupt(&z); // nothing pending
+  z80_step(&z); // ld a,i runs with P/V set
+  z80_gen_int(&z, 0xFF); // raised after the step
+  z80_check_interrupt(&z); // taken here
+  int r = expect_taken(name, &z, 0x0002);
+  if (z.a != 0x80 || pack_qf(&z) != 0x81) {
+    printf("*** ERROR %s: a %02X f %02X (expected 80 81)\n", name, z.a,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// EI holds the interrupt off through its own boundary; it is taken at
+// the end of LD A,I instead, with P/V clear.
+static int check_ldair_after_ei(void) {
+  const char* name = "ei ; ld a,i";
+  z80 z;
+  init_ldair_cpu(&z);
+  memory[0x0000] = 0xFB; // ei
+  memory[0x0001] = 0xED;
+  memory[0x0002] = 0x57; // ld a,i
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z); // ei
+  if (expect_held(name, "after EI", &z, 0x0001)) {
+    return 1;
+  }
+  z80_step(&z); // ED prefix step
+  if (expect_held(name, "after the ED step", &z, 0x0002)) {
+    return 1;
+  }
+  z80_step(&z); // ld a,i: taken at its end
+  int r = expect_taken(name, &z, 0x0003);
+  if (z.a != 0x80 || pack_qf(&z) != 0x81) {
+    printf("*** ERROR %s: a %02X f %02X (expected 80 81)\n", name, z.a,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// LD A,R behaves the same: the ED and 5F steps refresh R from 0x10 to
+// 0x12, A reads that back, the acknowledge fetch refreshes R once more,
+// and the accepted INT clears P/V.
+static int check_ldair_ld_a_r(void) {
+  const char* name = "ld a,r with int accepted";
+  z80 z;
+  init_ldair_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x5F; // ld a,r
+  z.r = 0x10;
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  z80_step(&z);
+  int r = expect_taken(name, &z, 0x0002);
+  if (z.a != 0x12 || z.r != 0x13 || pack_qf(&z) != 0x01) {
+    printf("*** ERROR %s: a %02X r %02X f %02X (expected 12 13 01)\n",
+        name, z.a, z.r, pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// The window ends at once: an INT raised after LD A,I's step is taken
+// after the NOP that follows, with P/V still set.
+static int check_ldair_after_nop(void) {
+  const char* name = "ld a,i ; nop with late int";
+  z80 z;
+  init_ldair_cpu(&z);
+  z.int_check_by_host = 1;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  memory[0x0002] = 0x00; // nop
+  z80_step(&z);
+  z80_check_interrupt(&z);
+  z80_step(&z);
+  z80_check_interrupt(&z); // P/V set, nothing pending
+  if (z.a != 0x80 || pack_qf(&z) != 0x85) {
+    printf("*** ERROR %s: a %02X f %02X after ld a,i (expected 80 85)\n",
+        name, z.a, pack_qf(&z));
+    return 1;
+  }
+  z80_gen_int(&z, 0xFF); // raised after LD A,I's step
+  z80_step(&z); // nop
+  z80_check_interrupt(&z); // taken here
+  int r = expect_taken(name, &z, 0x0003);
+  if (z.a != 0x80 || pack_qf(&z) != 0x85) {
+    printf("*** ERROR %s: a %02X f %02X (expected 80 85)\n", name, z.a,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// An NMI at the end of LD A,I leaves P/V alone: it only clears IFF1,
+// so the late copy still reads the set IFF2.
+static int check_ldair_nmi(void) {
+  const char* name = "ld a,i with nmi";
+  z80 z;
+  init_ldair_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_gen_nmi(&z);
+  z80_step(&z);
+  z80_step(&z);
+  if (z.pc != 0x0066 || z.nmi_pending || pushed_return(&z) != 0x0002 ||
+      !z.iff2 || z.iff1 || z.a != 0x80 || pack_qf(&z) != 0x85) {
+    printf("*** ERROR %s: pc %04X return %04X nmi %d iff1 %d iff2 %d"
+        " a %02X f %02X (expected 0066 0002 0 0 1 80 85)\n", name, z.pc,
+        pushed_return(&z), z.nmi_pending, z.iff1, z.iff2, z.a,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// With both pending the NMI wins at LD A,I's end with P/V set, and the
+// INT stays pending (IFF1 is clear).
+static int check_ldair_nmi_and_int(void) {
+  const char* name = "ld a,i with nmi and int";
+  z80 z;
+  init_ldair_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_gen_nmi(&z);
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  z80_step(&z);
+  if (z.pc != 0x0066 || pushed_return(&z) != 0x0002 || !z.int_pending ||
+      !z.iff2 || z.iff1 || z.a != 0x80 || pack_qf(&z) != 0x85) {
+    printf("*** ERROR %s: pc %04X return %04X int %d iff1 %d iff2 %d"
+        " a %02X f %02X (expected 0066 0002 1 0 1 80 85)\n", name, z.pc,
+        pushed_return(&z), z.int_pending, z.iff1, z.iff2, z.a,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// The configuration switch: with the NMOS behaviour off, an accepted
+// INT leaves the copied IFF2 alone.
+static int check_ldair_bug_off(void) {
+  const char* name = "ld a,i with int accepted, bug off";
+  z80 z;
+  init_ldair_cpu(&z);
+  z.nmos_ld_a_ir_bug = 0;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  z80_step(&z);
+  int r = expect_taken(name, &z, 0x0002);
+  if (z.a != 0x80 || pack_qf(&z) != 0x85) {
+    printf("*** ERROR %s: a %02X f %02X (expected 80 85)\n", name, z.a,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// Inside an NMI handler (IFF1 clear, IFF2 set) no INT is accepted, so
+// P/V keeps IFF2 even with one pending.
+static int check_ldair_iff1_clear(void) {
+  const char* name = "ld a,i with iff1 clear";
+  z80 z;
+  init_ldair_cpu(&z);
+  z.iff1 = 0;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  z80_step(&z);
+  if (expect_held(name, "after ld a,i", &z, 0x0002)) {
+    return 1;
+  }
+  if (z.a != 0x80 || pack_qf(&z) != 0x85 || !z.iff2) {
+    printf("*** ERROR %s: a %02X f %02X iff2 %d (expected 80 85 1)\n",
+        name, z.a, pack_qf(&z), z.iff2);
+    return 1;
+  }
+  return 0;
+}
+
+// IM 0 with 0xFF on the bus (RST 38) clears P/V the same way.
+static int check_ldair_im0(void) {
+  const char* name = "ld a,i with int accepted in im 0";
+  z80 z;
+  init_ldair_cpu(&z);
+  z.interrupt_mode = 0;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_gen_int(&z, 0xFF); // rst 38
+  z80_step(&z);
+  z80_step(&z);
+  int r = expect_taken(name, &z, 0x0002);
+  if (z.a != 0x80 || pack_qf(&z) != 0x81) {
+    printf("*** ERROR %s: a %02X f %02X (expected 80 81)\n", name, z.a,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// IM 2 through a vector table at I:20h (I stays 0x80) clears P/V too.
+static int check_ldair_im2(void) {
+  const char* name = "ld a,i with int accepted in im 2";
+  z80 z;
+  init_ldair_cpu(&z);
+  z.interrupt_mode = 2;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  memory[0x8020] = 0x34;
+  memory[0x8021] = 0x12;
+  z80_gen_int(&z, 0x20);
+  z80_step(&z);
+  z80_step(&z);
+  if (z.pc != 0x1234 || z.int_pending || pushed_return(&z) != 0x0002 ||
+      z.iff1 || z.iff2 || z.a != 0x80 || pack_qf(&z) != 0x81) {
+    printf("*** ERROR %s: pc %04X return %04X int %d iff1 %d iff2 %d"
+        " a %02X f %02X (expected 1234 0002 0 0 0 80 81)\n", name, z.pc,
+        pushed_return(&z), z.int_pending, z.iff1, z.iff2, z.a,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// LD I,A sets no late flag: an accepted INT leaves the seeded P/V set.
+static int check_ldair_ld_i_a(void) {
+  const char* name = "ld i,a with int accepted";
+  z80 z;
+  init_ldair_cpu(&z);
+  seed_qf(&z, 0x04); // P/V seeded set
+  z.a = 0x55;
+  z.i = 0x00;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x47; // ld i,a
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  z80_step(&z);
+  int r = expect_taken(name, &z, 0x0002);
+  if (z.i != 0x55 || pack_qf(&z) != 0x04) {
+    printf("*** ERROR %s: i %02X f %02X (expected 55 04)\n", name, z.i,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// Any other flag writer is untouched: XOR A sets P/V by parity and the
+// accepted INT keeps it.
+static int check_ldair_other_flags(void) {
+  const char* name = "xor a with int accepted";
+  z80 z;
+  init_ldair_cpu(&z);
+  seed_qf(&z, 0x00);
+  z.a = 0xFF;
+  memory[0x0000] = 0xAF; // xor a
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  int r = expect_taken(name, &z, 0x0001);
+  if (z.a != 0x00 || pack_qf(&z) != 0x44) {
+    printf("*** ERROR %s: a %02X f %02X (expected 00 44)\n", name, z.a,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// A prefix step ends the window: the INT raised after LD A,I is held
+// through the DD prefix step and taken after DD 00, with P/V still set.
+static int check_ldair_prefix_boundary(void) {
+  const char* name = "ld a,i ; dd nop with late int";
+  z80 z;
+  init_ldair_cpu(&z);
+  z.int_check_by_host = 1;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  memory[0x0002] = 0xDD;
+  memory[0x0003] = 0x00; // dd nop
+  z80_step(&z);
+  z80_check_interrupt(&z);
+  z80_step(&z);
+  z80_check_interrupt(&z);
+  z80_gen_int(&z, 0xFF); // raised after LD A,I's step
+  z80_step(&z); // DD prefix step
+  z80_check_interrupt(&z);
+  if (expect_held(name, "after the DD step", &z, 0x0003)) {
+    return 1;
+  }
+  z80_step(&z); // dd nop
+  z80_check_interrupt(&z); // taken here
+  int r = expect_taken(name, &z, 0x0004);
+  if (z.a != 0x80 || pack_qf(&z) != 0x85) {
+    printf("*** ERROR %s: a %02X f %02X (expected 80 85)\n", name, z.a,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+static int run_ld_a_ir_bug_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  r += check_ldair_int_taken();
+  r += check_ldair_no_int();
+  r += check_ldair_host_check();
+  r += check_ldair_after_ei();
+  r += check_ldair_ld_a_r();
+  r += check_ldair_after_nop();
+  r += check_ldair_nmi();
+  r += check_ldair_nmi_and_int();
+  r += check_ldair_bug_off();
+  r += check_ldair_iff1_clear();
+  r += check_ldair_im0();
+  r += check_ldair_im2();
+  r += check_ldair_ld_i_a();
+  r += check_ldair_other_flags();
+  r += check_ldair_prefix_boundary();
+  printf("*** ld a,i/r interrupt test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: stack write order
 // A push puts the high byte on the bus first: the write to the higher
 // address runs a full cycle ahead of the write to the lower one. CALL,
@@ -3540,6 +3932,9 @@ int main(int argc, char** argv) {
   if (argc > 1 && strcmp(argv[1], "qlatch") == 0) {
     return run_qlatch_test();
   }
+  if (argc > 1 && strcmp(argv[1], "ldairbug") == 0) {
+    return run_ld_a_ir_bug_test();
+  }
   if (argc > 1 && strcmp(argv[1], "pushorder") == 0) {
     return run_push_order_test();
   }
@@ -3607,6 +4002,7 @@ int main(int argc, char** argv) {
     r += run_chain_im0_test();
     r += run_prefix_step_test();
     r += run_qlatch_test();
+    r += run_ld_a_ir_bug_test();
     r += run_cyc_source_test();
   }
   return r != 0;
