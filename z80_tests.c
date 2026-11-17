@@ -525,15 +525,17 @@ static int run_ioflags_test(void) {
   static const uint8_t ini[] = {0xED, 0xA2};
   static const uint8_t inir[] = {0xED, 0xB2};
   static const uint8_t ind[] = {0xED, 0xAA};
+  static const uint8_t indr[] = {0xED, 0xBA};
   static const uint8_t outi[] = {0xED, 0xA3};
   static const uint8_t otir[] = {0xED, 0xB3};
   static const uint8_t outd[] = {0xED, 0xAB};
   static const uint8_t otdr[] = {0xED, 0xBB};
   int r = 0;
-  // IN B,(C): X/Y read bits 3/5 of the port value (here 239 = EF). The
-  // M5 mutant (no X/Y) reports 0/0 and reads F A0.
-  r += check_ioflag("in b,(c) xy", in_b_c, 0xB139, 181, 218, 0x6AEE, 0,
-      239, 0xB13B, 0xA8); // SingleStepTests "ED 40 0002"
+  // IN B,(C): X/Y read bits 3/5 of the port value (here 92 = 5C, bit 3
+  // set and bit 5 clear, so a swapped X/Y reads back 24). The M5 mutant
+  // (no X/Y) reports 0/0 and reads F 04.
+  r += check_ioflag("in b,(c) xy", in_b_c, 0xF54A, 120, 9, 0xBF28, 0,
+      92, 0xF54C, 0x0C); // SingleStepTests "ED 40 0001"
   // INI: k = data + (C + 1); H/C set past 255, PV from (k & 7) ^ B.
   r += check_ioflag("ini k over", ini, 0x5CB7, 64, 237, 0x72D5, 0, 117,
       0x5CB9, 0x3D); // SingleStepTests "ED A2 0001", k = 355
@@ -580,6 +582,14 @@ static int run_ioflags_test(void) {
   // INIR last (B reaches 0): the plain INI result stands.
   r += check_ioflag("inir last", inir, 0xB829, 1, 216, 0x3336, 0, 198,
       0xB82B, 0x53); // SingleStepTests "ED B2 004B"
+  // INDR repeat with the carry set (k = 394): the plain rule gives H/PV
+  // 1/1 (F 9F); the repeat change clears both.
+  r += check_ioflag("indr repeat carry", indr, 0x9F58, 252, 212,
+      0xBBB2, 0, 183, 0x9F58, 0x8B); // SingleStepTests "ED BA 0001"
+  // OTIR repeat with the carry set (k = 362): the plain rule gives H = 1
+  // (F 97); the repeat change clears it.
+  r += check_ioflag("otir repeat carry", otir, 0x10EE, 186, 250,
+      0xB4A3, 198, 0, 0x10EE, 0x87); // SingleStepTests "ED B3 0001"
   // OTDR repeats: the same four combinations for the OUT pair.
   r += check_ioflag("otdr repeat carry data80", otdr, 0xDD5F, 225, 160,
       0x125C, 213, 0, 0xDD5F, 0x9F); // SingleStepTests "ED BB 0000"
@@ -594,11 +604,13 @@ static int run_ioflags_test(void) {
   r += check_ioflag("otdr repeat next-pc xy", otdr, 0x6FFE, 137, 186,
       0x2BAB, 133, 0, 0x6FFE, 0xAF); // SingleStepTests "ED BB 019A"
   // OTDR last (B reaches 0): the plain OUTD result stands. The corpus
-  // holds no OTDR vector with B reaching 0, so this replays "ED AB 0037"
+  // holds no OTDR vector with B reaching 0, so this replays "ED AB 0274"
   // (an OUTD vector with initial B 1) under the OTDR opcode: outd() runs
-  // once and the repeat branch is not taken.
-  r += check_ioflag("otdr last", otdr, 0x9213, 1, 121, 0xBCD8, 40, 0,
-      0x9215, 0x40);
+  // once and the repeat branch is not taken. k = 285 overflows and the PC
+  // has bit 11 set, so adjusting H/PV or X/Y on the last iteration (as a
+  // repeat would) shows: X reads back 1, PV flips to 0 (F 57 expected).
+  r += check_ioflag("otdr last", otdr, 0x8850, 1, 239, 0x5E8F, 143, 0,
+      0x8852, 0x57);
   printf("*** io block flags test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);
   return r != 0;
