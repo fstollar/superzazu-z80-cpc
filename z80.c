@@ -784,12 +784,54 @@ static void in_r_c(z80* const z, uint8_t* r) {
   z->flags_written = 1;
   z->zf = *r == 0;
   z->sf = *r >> 7;
+  z->yf = GET_BIT(5, *r);
+  z->hf = 0;
+  z->xf = GET_BIT(3, *r);
   z->pf = parity(*r);
   z->nf = 0;
-  z->hf = 0;
 }
 
-static void ini(z80* const z) {
+// The I/O block instructions share one flag rule: S/Z/X/Y follow the
+// decremented B as after a DEC B, N copies bit 7 of the port or memory
+// byte, H and C are set when the 9-bit pairing k of that byte with its
+// neighbouring register overflows past 255, and PV is the parity of
+// (k & 7) xor the decremented B (Sean Young, The Undocumented Z80
+// Documented, section 4.3: k pairs the byte with L after the HL step for
+// the OUT pair, with C + 1 for INI, with C - 1 for IND).
+static inline void block_io_flags(z80* const z, uint16_t k, uint8_t data) {
+  z->sf = z->b >> 7;
+  z->zf = z->b == 0;
+  z->yf = GET_BIT(5, z->b);
+  z->hf = k > 255;
+  z->xf = GET_BIT(3, z->b);
+  z->pf = parity((uint8_t)((k & 7) ^ z->b));
+  z->nf = data >> 7;
+  z->cf = k > 255;
+  z->flags_written = 1;
+}
+
+// On a repeating INIR/INDR/OTIR/OTDR iteration the rewound instruction
+// re-executes, so the plain flags above are recomputed on the next pass;
+// the extra states that rewind the PC still leave their mark on H and PV
+// first (the Z80Decoder notes describe this for interrupted block
+// instructions), on top of the X/Y override, while the last iteration
+// (B reaches 0) keeps the plain single-step result. B here is already
+// decremented, CF the plain carry, data the port or memory byte.
+static inline void block_io_repeat_hp(z80* const z, uint8_t data) {
+  if (z->cf) {
+    if (data & 0x80) {
+      z->pf ^= parity((uint8_t)((z->b - 1) & 0x7)) ^ 1;
+      z->hf = (z->b & 0x0F) == 0x00;
+    } else {
+      z->pf ^= parity((uint8_t)((z->b + 1) & 0x7)) ^ 1;
+      z->hf = (z->b & 0x0F) == 0x0F;
+    }
+  } else {
+    z->pf ^= parity((uint8_t)(z->b & 0x7)) ^ 1;
+  }
+}
+
+static uint8_t ini(z80* const z) {
   // MEMPTR comes from BC as it was before B is decremented
   // (memptr_eng.txt: INI MEMPTR = BC_before_decrementing_B + 1).
   // The second fetch closes with one internal T ahead of the port read.
@@ -799,21 +841,25 @@ static void ini(z80* const z) {
   wb(z, get_hl(z), val);
   set_hl(z, get_hl(z) + 1);
   z->b -= 1;
-  z->flags_written = 1;
-  z->zf = z->b == 0;
-  z->nf = 1;
+  block_io_flags(z, val + (uint16_t)((z->c + 1) & 0xFF), val);
   z->mem_ptr = bc_before + 1;
+  return val;
 }
 
-static void ind(z80* const z) {
+static uint8_t ind(z80* const z) {
   // IND MEMPTR = BC_before_decrementing_B - 1 (memptr_eng.txt).
+  internal_t_states(z, 1);
   uint16_t bc_before = get_bc(z);
-  ini(z);
-  set_hl(z, get_hl(z) - 2);
+  uint8_t val = port_rd(z, bc_before, false);
+  wb(z, get_hl(z), val);
+  set_hl(z, get_hl(z) - 1);
+  z->b -= 1;
+  block_io_flags(z, val + (uint16_t)((z->c - 1) & 0xFF), val);
   z->mem_ptr = bc_before - 1;
+  return val;
 }
 
-static void outi(z80* const z) {
+static uint8_t outi(z80* const z) {
   // B is decremented before the port is accessed, so the port address
   // carries the decremented B (unlike INI/IND, which use BC before the
   // decrement). The Amstrad CPC compendium relies on this: CPC code loads
@@ -824,16 +870,20 @@ static void outi(z80* const z) {
   z->b -= 1;
   port_wr(z, get_bc(z), val, false);
   set_hl(z, get_hl(z) + 1);
-  z->flags_written = 1;
-  z->zf = z->b == 0;
-  z->nf = 1;
+  block_io_flags(z, val + z->l, val);
   z->mem_ptr = get_bc(z) + 1;
+  return val;
 }
 
-static void outd(z80* const z) {
-  outi(z);
-  set_hl(z, get_hl(z) - 2);
+static uint8_t outd(z80* const z) {
+  internal_t_states(z, 1);
+  uint8_t val = rb(z, get_hl(z));
+  z->b -= 1;
+  port_wr(z, get_bc(z), val, false);
+  set_hl(z, get_hl(z) - 1);
+  block_io_flags(z, val + z->l, val);
   z->mem_ptr = get_bc(z) - 1;
+  return val;
 }
 
 static void daa(z80* const z) {
@@ -2246,25 +2296,29 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     break; // in a, (c)
 
   case 0xA2: ini(z); break; // ini
-  case 0xB2:
-    ini(z);
+  case 0xB2: {
+    uint8_t data = ini(z);
     if (z->b > 0) {
       z->pc -= 2;
+      block_repeat_xy_from_pc(z);
+      block_io_repeat_hp(z, data);
       if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
-    break; // inir
+  } break; // inir
   case 0xAA: ind(z); break; // ind
-  case 0xBA:
-    ind(z);
+  case 0xBA: {
+    uint8_t data = ind(z);
     if (z->b > 0) {
       z->pc -= 2;
+      block_repeat_xy_from_pc(z);
+      block_io_repeat_hp(z, data);
       if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
-    break; // indr
+  } break; // indr
 
   case 0x41:
     port_wr(z, get_bc(z), z->b, false);
@@ -2301,9 +2355,11 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
 
   case 0xA3: outi(z); break; // outi
   case 0xB3: {
-    outi(z);
+    uint8_t data = outi(z);
     if (z->b > 0) {
       z->pc -= 2;
+      block_repeat_xy_from_pc(z);
+      block_io_repeat_hp(z, data);
       if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
@@ -2311,9 +2367,11 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
   } break; // otir
   case 0xAB: outd(z); break; // outd
   case 0xBB: {
-    outd(z);
+    uint8_t data = outd(z);
     if (z->b > 0) {
       z->pc -= 2;
+      block_repeat_xy_from_pc(z);
+      block_io_repeat_hp(z, data);
       if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;

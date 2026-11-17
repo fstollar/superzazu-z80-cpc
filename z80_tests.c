@@ -437,6 +437,173 @@ static int run_blockxy_test(void) {
   return r != 0;
 }
 
+// MARK: I/O block instruction flags
+// IN r,(C) reports X/Y from the value read (bits 3 and 5). INI/IND/OUTI/
+// OUTD set S/Z/X/Y from the decremented B, N from bit 7 of the port or
+// memory byte, H and C when a 9-bit sum k overflows past 255, and PV from
+// the parity of (k & 7) xor the decremented B, where k pairs the data byte
+// with the neighbouring register: L after the HL step for the OUT pair,
+// C + 1 for INI, C - 1 for IND. A repeating INIR/INDR/OTIR/OTDR iteration
+// instead reports X/Y from bits 11/13 of the rewound PC and adjusts H/PV
+// for the rewind (the extra end-of-instruction states the Z80Decoder notes
+// describe for interrupted block instructions); the last iteration, where
+// B reaches 0, keeps the plain single-step result. Every expected F byte
+// below is the final state of the named SingleStepTests vector, replayed
+// register-for-register (initial B/C/HL, the byte at HL, the port value).
+static uint8_t ioflags_port_val = 0;
+static int ioflags_port_count = 0;
+
+static uint8_t ioflags_in(z80* const z, uint16_t port) {
+  (void)z;
+  (void)port;
+  ioflags_port_count += 1;
+  return ioflags_port_val;
+}
+
+static void ioflags_out(z80* const z, uint16_t port, uint8_t val) {
+  (void)z;
+  (void)port;
+  (void)val;
+  ioflags_port_count += 1;
+}
+
+// Runs one I/O block step at `addr` and checks the full F byte, the PC,
+// and that exactly one port access happened. The data byte comes from the
+// port for the IN pair (ioflags_port_val) and from memory at HL for the
+// OUT pair (at_hl).
+static int check_ioflag(const char* name, const uint8_t* code, uint16_t addr,
+    uint8_t b, uint8_t c, uint16_t hl, uint8_t at_hl, uint8_t port_val,
+    uint16_t expected_pc, uint8_t expected_f) {
+  z80 z;
+  z80_init(&z);
+  z.read_byte = rb;
+  z.write_byte = wb;
+  z.port_in = ioflags_in;
+  z.port_out = ioflags_out;
+  memset(memory, 0, MEMORY_SIZE);
+  memcpy(&memory[addr], code, 2);
+  memory[hl] = at_hl;
+  z.pc = addr;
+  z.b = b;
+  z.c = c;
+  z.h = (uint8_t)(hl >> 8);
+  z.l = (uint8_t)(hl & 0xFF);
+  ioflags_port_val = port_val;
+  ioflags_port_count = 0;
+  seed_qf(&z, 0);
+  // Prefix bytes are their own steps; run to the end of the instruction.
+  // (A repeat rewinds the pc and finishes in the same opcode step, so the
+  // loop ends with pending NONE there too.)
+  do {
+    z80_step(&z);
+  } while (z.pending_prefix != Z80_PREFIX_NONE);
+  int failed = 0;
+  if (z.pc != expected_pc) {
+    printf("*** ERROR %s: PC %04X (expected %04X)\n", name, z.pc,
+        expected_pc);
+    failed = 1;
+  }
+  const uint8_t f = pack_qf(&z);
+  if (f != expected_f) {
+    printf("*** ERROR %s: F %02X (expected %02X)\n", name, f, expected_f);
+    failed = 1;
+  }
+  if (ioflags_port_count != 1) {
+    printf("*** ERROR %s: %d port accesses (expected 1)\n", name,
+        ioflags_port_count);
+    failed = 1;
+  }
+  return failed;
+}
+
+static int run_ioflags_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  static const uint8_t in_b_c[] = {0xED, 0x40};
+  static const uint8_t ini[] = {0xED, 0xA2};
+  static const uint8_t inir[] = {0xED, 0xB2};
+  static const uint8_t ind[] = {0xED, 0xAA};
+  static const uint8_t outi[] = {0xED, 0xA3};
+  static const uint8_t otir[] = {0xED, 0xB3};
+  static const uint8_t outd[] = {0xED, 0xAB};
+  static const uint8_t otdr[] = {0xED, 0xBB};
+  int r = 0;
+  // IN B,(C): X/Y read bits 3/5 of the port value (here 239 = EF). The
+  // M5 mutant (no X/Y) reports 0/0 and reads F A0.
+  r += check_ioflag("in b,(c) xy", in_b_c, 0xB139, 181, 218, 0x6AEE, 0,
+      239, 0xB13B, 0xA8); // SingleStepTests "ED 40 0002"
+  // INI: k = data + (C + 1); H/C set past 255, PV from (k & 7) ^ B.
+  r += check_ioflag("ini k over", ini, 0x5CB7, 64, 237, 0x72D5, 0, 117,
+      0x5CB9, 0x3D); // SingleStepTests "ED A2 0001", k = 355
+  r += check_ioflag("ini k within", ini, 0xD3A9, 102, 98, 0x550F, 0, 91,
+      0xD3AB, 0x24); // SingleStepTests "ED A2 0000", k = 190
+  // INI with data + C == 255: the M2 mutant (C instead of C + 1 in k)
+  // misses the carry and reads H/C 0/0 (F 87).
+  r += check_ioflag("ini c plus one", ini, 0x8315, 131, 17, 0xB73D, 0, 238,
+      0x8317, 0x97); // SingleStepTests "ED A2 0342", k = 256
+  // IND: k = data + (C - 1).
+  r += check_ioflag("ind k over", ind, 0x0251, 41, 156, 0xF2B0, 0, 198,
+      0x0253, 0x3B); // SingleStepTests "ED AA 0003", k = 353
+  r += check_ioflag("ind k within", ind, 0x90BE, 250, 136, 0xAAB0, 0, 41,
+      0x90C0, 0xAC); // SingleStepTests "ED AA 0000", k = 176
+  // OUTI: k = data + L after the HL increment.
+  r += check_ioflag("outi k over", outi, 0xCA85, 216, 10, 0x0590, 242, 0,
+      0xCA87, 0x97); // SingleStepTests "ED A3 0000", k = 387
+  r += check_ioflag("outi k within", outi, 0x9301, 56, 143, 0xD340, 156, 0,
+      0x9303, 0x22); // SingleStepTests "ED A3 0001", k = 221
+  // OUTI with data + L == 255 before the increment: the M1 mutant (the
+  // old L in k) misses the carry and reads H/C 0/0 (F 07).
+  r += check_ioflag("outi incremented l", outi, 0xDEFF, 121, 199, 0xF151,
+      174, 0, 0xDF01, 0x3F); // SingleStepTests "ED A3 00E6", k = 256
+  // OUTD: k = data + L after the HL decrement.
+  r += check_ioflag("outd k over", outd, 0xF722, 221, 88, 0xC9FB, 192, 0,
+      0xF724, 0x9F); // SingleStepTests "ED AB 0001", k = 442
+  r += check_ioflag("outd k within", outd, 0xBA1C, 217, 147, 0xDE11, 208, 0,
+      0xBA1E, 0x8E); // SingleStepTests "ED AB 0000", k = 224
+  // INIR repeats: X/Y from bits 11/13 of the rewound PC, H/PV adjusted
+  // for the rewind, in every carry/data-bit-7 combination. The M3 mutant
+  // (no H/PV change) keeps the plain single-step H/PV here.
+  r += check_ioflag("inir repeat carry data80", inir, 0x5F7E, 255, 216,
+      0xA02C, 0, 172, 0x5F7E, 0x8B); // SingleStepTests "ED B2 0007"
+  r += check_ioflag("inir repeat carry dataclear", inir, 0x7BD7, 109, 157,
+      0x13B2, 0, 118, 0x7BD7, 0x29); // SingleStepTests "ED B2 0000"
+  r += check_ioflag("inir repeat nocarry data80", inir, 0x361D, 50, 55,
+      0x42E9, 0, 154, 0x361D, 0x22); // SingleStepTests "ED B2 0001"
+  r += check_ioflag("inir repeat nocarry dataclear", inir, 0x8B51, 213, 22,
+      0x4A2E, 0, 26, 0x8B51, 0x8C); // SingleStepTests "ED B2 0003"
+  // At 0x07FF the pre-rewind PC is 0x0801, so X/Y from the next PC instead
+  // of the rewound one (the M4 mutant) would read 1/0.
+  r += check_ioflag("inir repeat next-pc xy", inir, 0x07FF, 143, 41, 0x50E6,
+      0, 86, 0x07FF, 0x84); // SingleStepTests "ED B2 0370"
+  // INIR last (B reaches 0): the plain INI result stands.
+  r += check_ioflag("inir last", inir, 0xB829, 1, 216, 0x3336, 0, 198,
+      0xB82B, 0x53); // SingleStepTests "ED B2 004B"
+  // OTDR repeats: the same four combinations for the OUT pair.
+  r += check_ioflag("otdr repeat carry data80", otdr, 0xDD5F, 225, 160,
+      0x125C, 213, 0, 0xDD5F, 0x9F); // SingleStepTests "ED BB 0000"
+  r += check_ioflag("otdr repeat carry dataclear", otdr, 0x7D6C, 252, 106,
+      0xD6AA, 125, 0, 0x7D6C, 0xAD); // SingleStepTests "ED BB 0003"
+  r += check_ioflag("otdr repeat nocarry data80", otdr, 0x52BF, 207, 184,
+      0xF013, 162, 0, 0x52BF, 0x86); // SingleStepTests "ED BB 0001"
+  r += check_ioflag("otdr repeat nocarry dataclear", otdr, 0x0BE5, 20, 165,
+      0xD9AE, 39, 0, 0x0BE5, 0x0C); // SingleStepTests "ED BB 0004"
+  // At 0x6FFE the pre-rewind PC is 0x7000, so X/Y from the next PC (the
+  // M4 mutant) would read 0/1 instead of 1/1.
+  r += check_ioflag("otdr repeat next-pc xy", otdr, 0x6FFE, 137, 186,
+      0x2BAB, 133, 0, 0x6FFE, 0xAF); // SingleStepTests "ED BB 019A"
+  // OTDR last (B reaches 0): the plain OUTD result stands. The corpus
+  // holds no OTDR vector with B reaching 0, so this replays "ED AB 0037"
+  // (an OUTD vector with initial B 1) under the OTDR opcode: outd() runs
+  // once and the repeat branch is not taken.
+  r += check_ioflag("otdr last", otdr, 0x9213, 1, 121, 0xBCD8, 40, 0,
+      0x9215, 0x40);
+  printf("*** io block flags test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: interrupt after EI
 // No interrupt is accepted at the boundary right after EI, only after the
 // instruction that follows it (z80-documented section 5.5). A host that
@@ -3337,6 +3504,9 @@ int main(int argc, char** argv) {
   if (argc > 1 && strcmp(argv[1], "blockxy") == 0) {
     return run_blockxy_test();
   }
+  if (argc > 1 && strcmp(argv[1], "ioflags") == 0) {
+    return run_ioflags_test();
+  }
   if (argc > 1 && strcmp(argv[1], "eidelay") == 0) {
     return run_ei_delay_test();
   }
@@ -3417,6 +3587,7 @@ int main(int argc, char** argv) {
     r += run_ini_memptr_test();
     r += run_memptr_test();
     r += run_blockxy_test();
+    r += run_ioflags_test();
     r += run_ei_delay_test();
     r += run_reti_iff_test();
     r += run_stray_r_test();
