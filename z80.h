@@ -64,8 +64,10 @@ typedef enum {
 // differ. Timing-free. Only the Zilog NMOS behaviour exists yet; later
 // values are added per vendor.
 typedef enum {
-  Z80_VENDOR_ZILOG = 0 // Zilog NMOS and NMOS second sources:
-                       // SCF/CCF X/Y = (Q ^ F) | A
+  Z80_VENDOR_ZILOG = 0, // Zilog NMOS and NMOS second sources (SGS):
+                        // SCF/CCF X/Y = (Q ^ F) | A
+  Z80_VENDOR_LAST = Z80_VENDOR_ZILOG // highest valid value; move it
+                                    // when a vendor is added
 } z80_vendor_t;
 
 // Kind of bus cycle requested from im0_bus (see struct z80).

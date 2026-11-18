@@ -2105,7 +2105,13 @@ static int check_vendor_clamp(void) {
   const char* name = "set vendor clamps";
   z80 z;
   init_q_cpu(&z);
-  static const uint8_t bad[] = {1, 2, 3, 7, 0xFF};
+  // Derived from the last valid value, so later vendors need not edit
+  // this list: the first two are the nearest out-of-range values, the
+  // rest are wide and negative (as unsigned) bit patterns.
+  static const uint8_t bad[] = {
+    (uint8_t)(Z80_VENDOR_LAST + 1), (uint8_t)(Z80_VENDOR_LAST + 2),
+    7, 0x7F, 0xFF, (uint8_t)(z80_vendor_t)-1
+  };
   size_t i;
   for (i = 0; i < sizeof bad / sizeof bad[0]; i++) {
     z80_set_vendor(&z, (z80_vendor_t)bad[i]);

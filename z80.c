@@ -2527,7 +2527,7 @@ void z80_set_timing(z80* const z, const z80_timing_t* timing) {
 }
 
 void z80_set_vendor(z80* const z, z80_vendor_t vendor) {
-  z->vendor = vendor <= Z80_VENDOR_ZILOG ? vendor : Z80_VENDOR_ZILOG;
+  z->vendor = (unsigned)vendor <= (unsigned)Z80_VENDOR_LAST ? (uint8_t)vendor : Z80_VENDOR_ZILOG;
 }
 
 void z80_set_cyc_source(z80* const z, z80_cyc_source_t source) {
