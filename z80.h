@@ -60,6 +60,14 @@ typedef enum {
   Z80_CYC_FROM_WAIT_SLOTS = 1
 } z80_cyc_source_t;
 
+// Which manufacturer's behaviour the core reproduces where Z80 parts
+// differ. Timing-free. Only the Zilog NMOS behaviour exists yet; later
+// values are added per vendor.
+typedef enum {
+  Z80_VENDOR_ZILOG = 0 // Zilog NMOS and NMOS second sources:
+                       // SCF/CCF X/Y = (Q ^ F) | A
+} z80_vendor_t;
+
 // Kind of bus cycle requested from im0_bus (see struct z80).
 typedef enum {
   Z80_IM0_INTA = 0, // follow-on opcode byte after a prefix (M1 + IORQ cycle)
@@ -112,6 +120,9 @@ struct z80 {
                      // or, in Z80_CYC_FROM_WAIT_SLOTS, one charge per step
                      // from the WAIT-sampled M1 slots (see z80_cyc_source_t)
   const z80_timing_t* timing; // NULL until z80_init() sets z80_timing_generic
+  uint8_t vendor; // z80_vendor_t: which manufacturer's behaviour the core
+                  // reproduces where Z80 parts differ; z80_init() resets
+                  // it to Z80_VENDOR_ZILOG
   z80_cyc_source_t cyc_source; // where the cyc charge comes from (above);
                                // Z80_CYC_FROM_TABLE until z80_set_cyc_source
                                // selects the WAIT-sampled slots
@@ -229,6 +240,7 @@ void z80_debug_output(z80* const z);
 void z80_gen_nmi(z80* const z);
 void z80_gen_int(z80* const z, uint8_t data);
 void z80_set_timing(z80* const z, const z80_timing_t* timing);
+void z80_set_vendor(z80* const z, z80_vendor_t vendor);
 void z80_set_cyc_source(z80* const z, z80_cyc_source_t source);
 
 // Adds n T-states to the running bus cycle from inside one of its

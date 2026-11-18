@@ -2053,6 +2053,208 @@ static int check_ccf_after_ld(void) {
   return 0;
 }
 
+// z80_init() resets the vendor to Zilog, even after a value only a
+// later vendor holds was stored in the field directly.
+static int check_vendor_init_reset(void) {
+  const char* name = "init resets vendor";
+  z80 z;
+  z80_init(&z);
+  z.vendor = 0xA5;
+  z80_init(&z);
+  if (z.vendor != Z80_VENDOR_ZILOG) {
+    printf("*** ERROR %s: vendor %02X (expected 00)\n", name, z.vendor);
+    return 1;
+  }
+  return 0;
+}
+
+// A zero-initialised struct reads as Zilog: the field is 0, and SCF
+// with Q 0, F 0x28 and A 0 sets X/Y (F 0x29). The timing table is
+// attached by hand; only the vendor reading is under test.
+static int check_vendor_zero_init(void) {
+  const char* name = "zero init reads as zilog";
+  z80 z;
+  memset(&z, 0, sizeof z);
+  if (z.vendor != Z80_VENDOR_ZILOG) {
+    printf("*** ERROR %s: vendor %02X (expected 00)\n", name, z.vendor);
+    return 1;
+  }
+  z.timing = &z80_timing_generic;
+  z.read_byte = rb;
+  z.write_byte = wb;
+  z.port_in = in;
+  z.port_out = out;
+  memset(memory, 0, MEMORY_SIZE);
+  memory[0x0000] = 0x37; // scf
+  z.pc = 0;
+  z.sp = 0xF000;
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x29 || z.q != 0x29) {
+    printf("*** ERROR %s: q %02X f %02X (expected 29 29)\n", name, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// Out-of-range values clamp to Zilog, and the clamped core still runs
+// the Zilog X/Y rule.
+static int check_vendor_clamp(void) {
+  const char* name = "set vendor clamps";
+  z80 z;
+  init_q_cpu(&z);
+  static const uint8_t bad[] = {1, 2, 3, 7, 0xFF};
+  size_t i;
+  for (i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+    z80_set_vendor(&z, (z80_vendor_t)bad[i]);
+    if (z.vendor != Z80_VENDOR_ZILOG) {
+      printf("*** ERROR %s: vendor %02X after setting %02X (expected 00)\n",
+          name, z.vendor, bad[i]);
+      return 1;
+    }
+  }
+  z80_set_vendor(&z, Z80_VENDOR_ZILOG);
+  if (z.vendor != Z80_VENDOR_ZILOG) {
+    printf("*** ERROR %s: vendor %02X (expected 00)\n", name, z.vendor);
+    return 1;
+  }
+  memory[0x0000] = 0x37; // scf
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z.q = 0;
+  z80_step(&z);
+  if (pack_qf(&z) != 0x29 || z.q != 0x29) {
+    printf("*** ERROR %s: q %02X f %02X (expected 29 29)\n", name, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// SCF with Q 0, F 0x28 and A 0: the Zilog rule keeps X/Y set (F 0x29),
+// with C set and H/N clear.
+static int check_scf_q_zero_xy(void) {
+  const char* name = "ld b,0 ; scf with f 28 (zilog)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x06; // ld b,n
+  memory[0x0001] = 0x00;
+  memory[0x0002] = 0x37; // scf
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_ZILOG);
+  z80_step(&z);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x29 || z.q != 0x29 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 29 29)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// CCF with Q 0, F 0x28 (C clear) and A 0: H takes the old C (0), C
+// sets, X/Y stay set (F 0x29), N clear.
+static int check_ccf_q_zero_xy(void) {
+  const char* name = "ld b,0 ; ccf with f 28 (zilog)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x06; // ld b,n
+  memory[0x0001] = 0x00;
+  memory[0x0002] = 0x3F; // ccf
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_ZILOG);
+  z80_step(&z);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x29 || z.q != 0x29 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 29 29)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// CCF after a flag writer reads Q == F: BIT 3,B leaves F 0x18, so
+// (Q ^ F) | A is 0 and CCF's X/Y come out clear (F 0x01).
+static int check_ccf_after_bit(void) {
+  const char* name = "bit 3,b ; ccf (zilog)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xCB;
+  memory[0x0001] = 0x58; // bit 3,b
+  memory[0x0002] = 0x3F; // ccf
+  z.a = 0;
+  seed_qf(&z, 0);
+  z.b = 0x08;
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_ZILOG);
+  z80_step(&z); // CB prefix
+  z80_step(&z); // bit 3,b
+  z80_step(&z); // ccf
+  if (pack_qf(&z) != 0x01 || z.q != 0x01 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 01 01)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// DD SCF after a flag writer reads Q 0 anyway: the prefix byte clears
+// the latched F 0x28, so with A 0 the Zilog rule keeps X/Y set
+// (F 0x29).
+static int check_dd_scf_after_flag_writer(void) {
+  const char* name = "flag writer ; dd 37 (zilog)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xDD;
+  memory[0x0001] = 0x37; // scf
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z.q = 0x28; // as if a flag writer left F 0x28 latched
+  z80_set_vendor(&z, Z80_VENDOR_ZILOG);
+  z80_step(&z); // DD prefix step: clears Q
+  z80_step(&z); // SCF itself
+  if (pack_qf(&z) != 0x29 || z.q != 0x29 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 29 29)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// SCF with A 0x28, F 0 and Q 0: A alone sets X/Y (F 0x29), with C set
+// and H/N clear.
+static int check_scf_a_xy(void) {
+  const char* name = "ld b,0 ; scf with a 28 (zilog)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x06; // ld b,n
+  memory[0x0001] = 0x00;
+  memory[0x0002] = 0x37; // scf
+  z.a = 0x28;
+  seed_qf(&z, 0x00);
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_ZILOG);
+  z80_step(&z);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x29 || z.q != 0x29 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 29 29)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
 // Accepting a maskable interrupt drops the running instruction's flag
 // state even when that instruction wrote the flags (ADD leaves F
 // 0x51): Q is 0 afterwards.
@@ -2130,6 +2332,14 @@ static int run_qlatch_test(void) {
   r += check_scf_after_pop_af();
   r += check_dd_scf_clears_q();
   r += check_ccf_after_ld();
+  r += check_vendor_init_reset();
+  r += check_vendor_zero_init();
+  r += check_vendor_clamp();
+  r += check_scf_q_zero_xy();
+  r += check_ccf_q_zero_xy();
+  r += check_ccf_after_bit();
+  r += check_dd_scf_after_flag_writer();
+  r += check_scf_a_xy();
   r += check_q_after_int();
   r += check_q_after_nmi();
   r += check_q_after_halt();

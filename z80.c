@@ -300,6 +300,17 @@ static inline void set_f(z80* const z, uint8_t val) {
   z->sf = (val >> 7) & 1;
 }
 
+// Undocumented X/Y source for SCF/CCF: bits of (Q ^ F) the vendor lets
+// through, ORed with A. Only the Zilog behaviour exists yet, so the
+// mask is 0x28; later vendors add their own arms.
+static inline uint8_t scf_ccf_xy(const z80* const z, uint8_t f_before) {
+  uint8_t q_mask;
+  switch (z->vendor) {
+  default: q_mask = 0x28; break;
+  }
+  return (uint8_t)(((z->q ^ f_before) & q_mask) | z->a);
+}
+
 // increments R, keeping the highest byte intact
 static inline void inc_r(z80* const z) {
   z->r = (z->r & 0x80) | ((z->r + 1) & 0x7f);
@@ -1154,6 +1165,7 @@ void z80_init(z80* const z) {
   z->step_m1_sample_tstate = 0;
   z->port_high_byte_from_a = false;
   z->timing = &z80_timing_generic;
+  z->vendor = Z80_VENDOR_ZILOG;
   z->cyc_source = Z80_CYC_FROM_TABLE;
   z->cyc_derived_step = 0;
 
@@ -1656,14 +1668,14 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     break; // cpl
 
   case 0x37: {
-    // Undocumented X/Y come from (Q ^ F) | A with F from before the
-    // instruction.
+    // Undocumented X/Y come from the vendor helper with F from before
+    // the instruction.
     const uint8_t f_before = get_f(z);
     z->cf = 1;
     z->nf = 0;
     z->hf = 0;
-    z->xf = GET_BIT(3, (z->q ^ f_before) | z->a);
-    z->yf = GET_BIT(5, (z->q ^ f_before) | z->a);
+    z->xf = GET_BIT(3, scf_ccf_xy(z, f_before));
+    z->yf = GET_BIT(5, scf_ccf_xy(z, f_before));
     z->flags_written = 1;
   } break; // scf
 
@@ -1673,8 +1685,8 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     z->hf = z->cf;
     z->cf = !z->cf;
     z->nf = 0;
-    z->xf = GET_BIT(3, (z->q ^ f_before) | z->a);
-    z->yf = GET_BIT(5, (z->q ^ f_before) | z->a);
+    z->xf = GET_BIT(3, scf_ccf_xy(z, f_before));
+    z->yf = GET_BIT(5, scf_ccf_xy(z, f_before));
     z->flags_written = 1;
   } break; // ccf
 
@@ -2512,6 +2524,10 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
 
 void z80_set_timing(z80* const z, const z80_timing_t* timing) {
   z->timing = timing;
+}
+
+void z80_set_vendor(z80* const z, z80_vendor_t vendor) {
+  z->vendor = vendor <= Z80_VENDOR_ZILOG ? vendor : Z80_VENDOR_ZILOG;
 }
 
 void z80_set_cyc_source(z80* const z, z80_cyc_source_t source) {
