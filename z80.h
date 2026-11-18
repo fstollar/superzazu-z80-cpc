@@ -175,9 +175,8 @@ struct z80 {
   uint8_t q;
   uint8_t flags_written; // internal: set when the running step writes the flags
   // Whether LD A,I and LD A,R leave P/V cleared when a maskable
-  // interrupt is accepted at their end: the late P/V copy of IFF2 lands
-  // after the acceptance has cleared IFF2. Later parts copy IFF2 before
-  // the acceptance clears it, so they leave P/V alone.
+  // interrupt is accepted at their end. Zilog's CMOS part fixed this
+  // (Zilog Z80 Family Q&A); other vendors' later parts differ.
   bool nmos_ld_a_ir_bug; // configuration: 1 models the NMOS behaviour
   // Set by LD A,I and LD A,R: their P/V copy of IFF2 lands after an
   // interrupt acceptance at the step's end, so an accepted maskable

@@ -1019,10 +1019,10 @@ static inline void process_interrupts(z80* const z) {
     // accepting the interrupt drops the running instruction's flag
     // state; the call (or the IM 0 instruction below) latches Q itself.
     q_clear(z);
-    // NMOS: LD A,I / LD A,R copy IFF2 into P/V only after an interrupt
-    // acceptance at their end has cleared IFF2, so an accepted maskable
-    // interrupt leaves P/V = 0 (Zilog Z80 Family Q&A). NMI leaves IFF2
-    // alone, so it leaves P/V alone. Fixed on later parts.
+    // NMOS: LD A,I / LD A,R leave P/V = 0 when a maskable interrupt is
+    // accepted at their end (Zilog Z80 Family Q&A). NMI leaves IFF2
+    // alone, so it leaves P/V alone. Zilog's CMOS part fixed this;
+    // other vendors' later parts differ.
     if (z->ld_a_ir_late_pv && z->nmos_ld_a_ir_bug)
       z->pf = 0;
     z->ld_a_ir_late_pv = 0;
