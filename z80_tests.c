@@ -2255,6 +2255,30 @@ static int check_scf_a_xy(void) {
   return 0;
 }
 
+// OUT (C),0 sends 0x00 on the Zilog behaviour. Only the later CMOS
+// values change it, but this pins the untouched path against a send-0xFF
+// regression.
+static int check_ed71_sends_zero(void) {
+  const char* name = "out (c),0 (zilog)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x71; // out (c),0
+  z.b = 0x12;
+  z.c = 0x34;
+  z80_set_vendor(&z, Z80_VENDOR_ZILOG);
+  z.port_out = record_out;
+  out_count = 0;
+  z80_step(&z); // ED prefix
+  z80_step(&z); // out (c),0
+  if (out_count != 1 || last_out_port != 0x1234 || last_out_val != 0x00) {
+    printf("*** ERROR %s: count %d port %04X val %02X (expected 1 1234 00)\n",
+        name, out_count, last_out_port, last_out_val);
+    return 1;
+  }
+  return 0;
+}
+
 // Accepting a maskable interrupt drops the running instruction's flag
 // state even when that instruction wrote the flags (ADD leaves F
 // 0x51): Q is 0 afterwards.
@@ -2340,6 +2364,7 @@ static int run_qlatch_test(void) {
   r += check_ccf_after_bit();
   r += check_dd_scf_after_flag_writer();
   r += check_scf_a_xy();
+  r += check_ed71_sends_zero();
   r += check_q_after_int();
   r += check_q_after_nmi();
   r += check_q_after_halt();
