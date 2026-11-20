@@ -2285,6 +2285,179 @@ static int check_ed71_sends_zero(void) {
   return 0;
 }
 
+// SCF with Q 0, F 0x28 and A 0 on the NEC behaviour: the uPD780C takes
+// X/Y from A alone, so both come out clear (F 0x01), with C set and H/N
+// clear.
+static int check_scf_q_zero_xy_nec(void) {
+  const char* name = "ld b,0 ; scf with f 28 (nec)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x06; // ld b,n
+  memory[0x0001] = 0x00;
+  memory[0x0002] = 0x37; // scf
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
+  z80_step(&z);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x01 || z.q != 0x01 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 01 01)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// CCF with Q 0, F 0x28 (C clear) and A 0 on the NEC behaviour: H takes
+// the old C (0), C sets, X/Y come out clear (F 0x01), N clear.
+static int check_ccf_q_zero_xy_nec(void) {
+  const char* name = "ld b,0 ; ccf with f 28 (nec)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x06; // ld b,n
+  memory[0x0001] = 0x00;
+  memory[0x0002] = 0x3F; // ccf
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
+  z80_step(&z);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x01 || z.q != 0x01 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 01 01)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// SCF after a flag writer on the NEC behaviour reads Q == F: BIT 3,B
+// leaves F 0x18, so A alone (0) sets X/Y and SCF's X/Y come out clear
+// (F 0x01).
+static int check_scf_after_bit_nec(void) {
+  const char* name = "bit 3,b ; scf (nec)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xCB;
+  memory[0x0001] = 0x58; // bit 3,b
+  memory[0x0002] = 0x37; // scf
+  z.a = 0;
+  seed_qf(&z, 0);
+  z.b = 0x08;
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
+  z80_step(&z); // CB prefix
+  z80_step(&z); // bit 3,b
+  z80_step(&z); // scf
+  if (pack_qf(&z) != 0x01 || z.q != 0x01 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 01 01)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// CCF after a flag writer on the NEC behaviour: same Q == F shape, so
+// X/Y come out clear (F 0x01).
+static int check_ccf_after_bit_nec(void) {
+  const char* name = "bit 3,b ; ccf (nec)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xCB;
+  memory[0x0001] = 0x58; // bit 3,b
+  memory[0x0002] = 0x3F; // ccf
+  z.a = 0;
+  seed_qf(&z, 0);
+  z.b = 0x08;
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
+  z80_step(&z); // CB prefix
+  z80_step(&z); // bit 3,b
+  z80_step(&z); // ccf
+  if (pack_qf(&z) != 0x01 || z.q != 0x01 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 01 01)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// DD SCF after a flag writer on the NEC behaviour reads Q 0 anyway: the
+// prefix byte clears the latched F 0x28, so with A 0 X/Y come out clear
+// (F 0x01).
+static int check_dd_scf_after_flag_writer_nec(void) {
+  const char* name = "flag writer ; dd 37 (nec)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xDD;
+  memory[0x0001] = 0x37; // scf
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z.q = 0x28; // as if a flag writer left F 0x28 latched
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
+  z80_step(&z); // DD prefix step: clears Q
+  z80_step(&z); // SCF itself
+  if (pack_qf(&z) != 0x01 || z.q != 0x01 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 01 01)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// SCF with A 0x28, F 0 and Q 0 on the NEC behaviour: A alone sets X/Y
+// (F 0x29), with C set and H/N clear.
+static int check_scf_a_xy_nec(void) {
+  const char* name = "ld b,0 ; scf with a 28 (nec)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x06; // ld b,n
+  memory[0x0001] = 0x00;
+  memory[0x0002] = 0x37; // scf
+  z.a = 0x28;
+  seed_qf(&z, 0x00);
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
+  z80_step(&z);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x29 || z.q != 0x29 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 29 29)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// OUT (C),0 sends 0x00 on the NEC behaviour too: the uPD780C is NMOS
+// and keeps the Zilog value.
+static int check_ed71_sends_zero_nec(void) {
+  const char* name = "out (c),0 (nec)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x71; // out (c),0
+  z.b = 0x12;
+  z.c = 0x34;
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
+  z.port_out = record_out;
+  out_count = 0;
+  z80_step(&z); // ED prefix
+  z80_step(&z); // out (c),0
+  if (out_count != 1 || last_out_port != 0x1234 || last_out_val != 0x00) {
+    printf("*** ERROR %s: count %d port %04X val %02X (expected 1 1234 00)\n",
+        name, out_count, last_out_port, last_out_val);
+    return 1;
+  }
+  return 0;
+}
+
 // Accepting a maskable interrupt drops the running instruction's flag
 // state even when that instruction wrote the flags (ADD leaves F
 // 0x51): Q is 0 afterwards.
@@ -2371,6 +2544,13 @@ static int run_qlatch_test(void) {
   r += check_dd_scf_after_flag_writer();
   r += check_scf_a_xy();
   r += check_ed71_sends_zero();
+  r += check_scf_q_zero_xy_nec();
+  r += check_ccf_q_zero_xy_nec();
+  r += check_scf_after_bit_nec();
+  r += check_ccf_after_bit_nec();
+  r += check_dd_scf_after_flag_writer_nec();
+  r += check_scf_a_xy_nec();
+  r += check_ed71_sends_zero_nec();
   r += check_q_after_int();
   r += check_q_after_nmi();
   r += check_q_after_halt();
@@ -2401,6 +2581,27 @@ static int check_ldair_int_taken(void) {
   init_ldair_cpu(&z);
   memory[0x0000] = 0xED;
   memory[0x0001] = 0x57; // ld a,i
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z); // ED prefix step: the interrupt stays held
+  z80_step(&z); // ld a,i: taken at its end
+  int r = expect_taken(name, &z, 0x0002);
+  if (z.a != 0x80 || pack_qf(&z) != 0x81 || z.q != 0) {
+    printf("*** ERROR %s: a %02X q %02X f %02X (expected 80 00 81)\n",
+        name, z.a, z.q, pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// LD A,I with an INT accepted at its end on the NEC behaviour: the
+// uPD780C is NMOS, so P/V is clear although IFF2 was set.
+static int check_ldair_int_taken_nec(void) {
+  const char* name = "ld a,i with int accepted (nec)";
+  z80 z;
+  init_ldair_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
   z80_gen_int(&z, 0xFF);
   z80_step(&z); // ED prefix step: the interrupt stays held
   z80_step(&z); // ld a,i: taken at its end
@@ -2752,6 +2953,7 @@ static int run_ld_a_ir_bug_test(void) {
   }
   int r = 0;
   r += check_ldair_int_taken();
+  r += check_ldair_int_taken_nec();
   r += check_ldair_no_int();
   r += check_ldair_host_check();
   r += check_ldair_after_ei();

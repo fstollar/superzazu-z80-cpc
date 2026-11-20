@@ -61,13 +61,14 @@ typedef enum {
 } z80_cyc_source_t;
 
 // Which manufacturer's behaviour the core reproduces where Z80 parts
-// differ. Timing-free. Only the Zilog NMOS behaviour exists yet; later
-// values are added per vendor.
+// differ. Timing-free. Zilog NMOS (and NMOS second sources like SGS)
+// and the NEC uPD780C (NMOS) exist; later values are added per vendor.
 typedef enum {
   Z80_VENDOR_ZILOG = 0, // Zilog NMOS and NMOS second sources (SGS):
                         // SCF/CCF X/Y = (Q ^ F) | A
-  Z80_VENDOR_LAST = Z80_VENDOR_ZILOG // highest valid value; move it
-                                    // when a vendor is added
+  Z80_VENDOR_NEC = 1, // NEC NMOS (uPD780C): SCF/CCF X/Y = A
+  Z80_VENDOR_LAST = Z80_VENDOR_NEC // highest valid value; move it
+                                  // when a vendor is added
 } z80_vendor_t;
 
 // Kind of bus cycle requested from im0_bus (see struct z80).

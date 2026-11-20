@@ -301,11 +301,12 @@ static inline void set_f(z80* const z, uint8_t val) {
 }
 
 // Undocumented X/Y source for SCF/CCF: bits of (Q ^ F) the vendor lets
-// through, ORed with A. Only the Zilog behaviour exists yet, so the
-// mask is 0x28; later vendors add their own arms.
+// through, ORed with A. The Zilog mask is 0x28; the NEC uPD780C takes
+// X/Y from A alone (mask 0x00). Later vendors add their own arms.
 static inline uint8_t scf_ccf_xy(const z80* const z, uint8_t f_before) {
   uint8_t q_mask;
   switch (z->vendor) {
+  case Z80_VENDOR_NEC: q_mask = 0x00; break;
   default: q_mask = 0x28; break;
   }
   return (uint8_t)(((z->q ^ f_before) & q_mask) | z->a);
