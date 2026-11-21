@@ -193,6 +193,7 @@ Tests complete
 *** outi port test: OK
 *** ini memptr test: OK
 *** memptr test: OK
+*** block x/y test: OK
 *** ei delay test: OK
 *** reti iff test: OK
 *** stray prefix R test: OK

@@ -300,6 +300,18 @@ static inline void set_f(z80* const z, uint8_t val) {
   z->sf = (val >> 7) & 1;
 }
 
+// Undocumented X/Y source for SCF/CCF: bits of (Q ^ F) the vendor lets
+// through, ORed with A. The Zilog mask is 0x28; the NEC uPD780C takes
+// X/Y from A alone (mask 0x00). Later vendors add their own arms.
+static inline uint8_t scf_ccf_xy(const z80* const z, uint8_t f_before) {
+  uint8_t q_mask;
+  switch (z->vendor) {
+  case Z80_VENDOR_NEC: q_mask = 0x00; break;
+  default: q_mask = 0x28; break;
+  }
+  return (uint8_t)(((z->q ^ f_before) & q_mask) | z->a);
+}
+
 // increments R, keeping the highest byte intact
 static inline void inc_r(z80* const z) {
   z->r = (z->r & 0x80) | ((z->r + 1) & 0x7f);
@@ -767,6 +779,15 @@ static inline void cpd(z80* const z) {
   z->mem_ptr -= 2;
 }
 
+// On a repeat, the CPU re-reads its own instruction, and the undocumented
+// X/Y flags come from bits 11 and 13 of the address it rewinds to
+// (hoglet67 Z80Decoder notes; Banks/Helcmanovsky block-instruction
+// findings; SingleStepTests ed b0/b8/b1/b9 vectors).
+static inline void block_repeat_xy_from_pc(z80* const z) {
+  z->xf = GET_BIT(11, z->pc);
+  z->yf = GET_BIT(13, z->pc);
+}
+
 static void in_r_c(z80* const z, uint8_t* r) {
   // MEMPTR = BC + 1 for every IN r,(C), taken before r is written (IN B
   // and IN C change BC).
@@ -775,12 +796,54 @@ static void in_r_c(z80* const z, uint8_t* r) {
   z->flags_written = 1;
   z->zf = *r == 0;
   z->sf = *r >> 7;
+  z->yf = GET_BIT(5, *r);
+  z->hf = 0;
+  z->xf = GET_BIT(3, *r);
   z->pf = parity(*r);
   z->nf = 0;
-  z->hf = 0;
 }
 
-static void ini(z80* const z) {
+// The I/O block instructions share one flag rule: S/Z/X/Y follow the
+// decremented B as after a DEC B, N copies bit 7 of the port or memory
+// byte, H and C are set when the 9-bit pairing k of that byte with its
+// neighbouring register overflows past 255, and PV is the parity of
+// (k & 7) xor the decremented B (Sean Young, The Undocumented Z80
+// Documented, section 4.3: k pairs the byte with L after the HL step for
+// the OUT pair, with C + 1 for INI, with C - 1 for IND).
+static inline void block_io_flags(z80* const z, uint16_t k, uint8_t data) {
+  z->sf = z->b >> 7;
+  z->zf = z->b == 0;
+  z->yf = GET_BIT(5, z->b);
+  z->hf = k > 255;
+  z->xf = GET_BIT(3, z->b);
+  z->pf = parity((uint8_t)((k & 7) ^ z->b));
+  z->nf = data >> 7;
+  z->cf = k > 255;
+  z->flags_written = 1;
+}
+
+// On a repeating INIR/INDR/OTIR/OTDR iteration the rewound instruction
+// re-executes, so the plain flags above are recomputed on the next pass;
+// the extra states that rewind the PC still leave their mark on H and PV
+// first (the Z80Decoder notes describe this for interrupted block
+// instructions), on top of the X/Y override, while the last iteration
+// (B reaches 0) keeps the plain single-step result. B here is already
+// decremented, CF the plain carry, data the port or memory byte.
+static inline void block_io_repeat_hp(z80* const z, uint8_t data) {
+  if (z->cf) {
+    if (data & 0x80) {
+      z->pf ^= parity((uint8_t)((z->b - 1) & 0x7)) ^ 1;
+      z->hf = (z->b & 0x0F) == 0x00;
+    } else {
+      z->pf ^= parity((uint8_t)((z->b + 1) & 0x7)) ^ 1;
+      z->hf = (z->b & 0x0F) == 0x0F;
+    }
+  } else {
+    z->pf ^= parity((uint8_t)(z->b & 0x7)) ^ 1;
+  }
+}
+
+static uint8_t ini(z80* const z) {
   // MEMPTR comes from BC as it was before B is decremented
   // (memptr_eng.txt: INI MEMPTR = BC_before_decrementing_B + 1).
   // The second fetch closes with one internal T ahead of the port read.
@@ -790,21 +853,25 @@ static void ini(z80* const z) {
   wb(z, get_hl(z), val);
   set_hl(z, get_hl(z) + 1);
   z->b -= 1;
-  z->flags_written = 1;
-  z->zf = z->b == 0;
-  z->nf = 1;
+  block_io_flags(z, val + (uint16_t)((z->c + 1) & 0xFF), val);
   z->mem_ptr = bc_before + 1;
+  return val;
 }
 
-static void ind(z80* const z) {
+static uint8_t ind(z80* const z) {
   // IND MEMPTR = BC_before_decrementing_B - 1 (memptr_eng.txt).
+  internal_t_states(z, 1);
   uint16_t bc_before = get_bc(z);
-  ini(z);
-  set_hl(z, get_hl(z) - 2);
+  uint8_t val = port_rd(z, bc_before, false);
+  wb(z, get_hl(z), val);
+  set_hl(z, get_hl(z) - 1);
+  z->b -= 1;
+  block_io_flags(z, val + (uint16_t)((z->c - 1) & 0xFF), val);
   z->mem_ptr = bc_before - 1;
+  return val;
 }
 
-static void outi(z80* const z) {
+static uint8_t outi(z80* const z) {
   // B is decremented before the port is accessed, so the port address
   // carries the decremented B (unlike INI/IND, which use BC before the
   // decrement). The Amstrad CPC compendium relies on this: CPC code loads
@@ -815,16 +882,20 @@ static void outi(z80* const z) {
   z->b -= 1;
   port_wr(z, get_bc(z), val, false);
   set_hl(z, get_hl(z) + 1);
-  z->flags_written = 1;
-  z->zf = z->b == 0;
-  z->nf = 1;
+  block_io_flags(z, val + z->l, val);
   z->mem_ptr = get_bc(z) + 1;
+  return val;
 }
 
-static void outd(z80* const z) {
-  outi(z);
-  set_hl(z, get_hl(z) - 2);
+static uint8_t outd(z80* const z) {
+  internal_t_states(z, 1);
+  uint8_t val = rb(z, get_hl(z));
+  z->b -= 1;
+  port_wr(z, get_bc(z), val, false);
+  set_hl(z, get_hl(z) - 1);
+  block_io_flags(z, val + z->l, val);
   z->mem_ptr = get_bc(z) - 1;
+  return val;
 }
 
 static void daa(z80* const z) {
@@ -920,6 +991,7 @@ static inline void process_interrupts(z80* const z) {
     z->iff1 = 0;
     z->int_accept = Z80_ACCEPT_ALL;
     q_clear(z);
+    z->ld_a_ir_late_pv = 0;
     inc_r(z);
 
     // The acknowledge M1 answers with no bus callback of its own; call()
@@ -959,6 +1031,13 @@ static inline void process_interrupts(z80* const z) {
     // accepting the interrupt drops the running instruction's flag
     // state; the call (or the IM 0 instruction below) latches Q itself.
     q_clear(z);
+    // NMOS: LD A,I / LD A,R leave P/V = 0 when a maskable interrupt is
+    // accepted at their end (Zilog Z80 Family Q&A). NMI leaves IFF2
+    // alone, so it leaves P/V alone. Zilog's CMOS part fixed this;
+    // other vendors' later parts differ.
+    if (z->ld_a_ir_late_pv && z->nmos_ld_a_ir_bug)
+      z->pf = 0;
+    z->ld_a_ir_late_pv = 0;
 
     switch (z->interrupt_mode) {
     case 0:
@@ -1093,6 +1172,7 @@ void z80_init(z80* const z) {
   z->step_m1_sample_tstate = 0;
   z->port_high_byte_from_a = false;
   z->timing = &z80_timing_generic;
+  z->vendor = Z80_VENDOR_ZILOG;
   z->cyc_source = Z80_CYC_FROM_TABLE;
   z->cyc_derived_step = 0;
 
@@ -1103,6 +1183,8 @@ void z80_init(z80* const z) {
   z->mem_ptr = 0;
   z->q = 0;
   z->flags_written = 0;
+  z->ld_a_ir_late_pv = 0;
+  z->nmos_ld_a_ir_bug = 1;
 
   // af and sp are set to 0xFFFF after reset,
   // and the other values are undefined (z80-documented)
@@ -1168,6 +1250,7 @@ z80_strobe_window_t z80_write_window(const z80* const z) {
 void z80_step(z80* const z) {
   z->int_accept = Z80_ACCEPT_ALL;
   z->flags_written = 0;
+  z->ld_a_ir_late_pv = 0;
   // When deriving the cycle count from the WAIT-sampled slots, the charge
   // spans from the step's own M1 sample slot to the next step's. On the
   // halted path no fetch runs; the slot is the one the fetch would have used.
@@ -1592,14 +1675,14 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     break; // cpl
 
   case 0x37: {
-    // Undocumented X/Y come from (Q ^ F) | A with F from before the
-    // instruction.
+    // Undocumented X/Y come from the vendor helper with F from before
+    // the instruction.
     const uint8_t f_before = get_f(z);
     z->cf = 1;
     z->nf = 0;
     z->hf = 0;
-    z->xf = GET_BIT(3, (z->q ^ f_before) | z->a);
-    z->yf = GET_BIT(5, (z->q ^ f_before) | z->a);
+    z->xf = GET_BIT(3, scf_ccf_xy(z, f_before));
+    z->yf = GET_BIT(5, scf_ccf_xy(z, f_before));
     z->flags_written = 1;
   } break; // scf
 
@@ -1609,8 +1692,8 @@ void exec_opcode(z80* const z, uint8_t opcode) {
     z->hf = z->cf;
     z->cf = !z->cf;
     z->nf = 0;
-    z->xf = GET_BIT(3, (z->q ^ f_before) | z->a);
-    z->yf = GET_BIT(5, (z->q ^ f_before) | z->a);
+    z->xf = GET_BIT(3, scf_ccf_xy(z, f_before));
+    z->yf = GET_BIT(5, scf_ccf_xy(z, f_before));
     z->flags_written = 1;
   } break; // ccf
 
@@ -2149,6 +2232,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     z->nf = 0;
     z->pf = z->iff2;
     z->flags_written = 1;
+    z->ld_a_ir_late_pv = 1;
     break; // ld a,i
 
   case 0x5F:
@@ -2162,6 +2246,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     z->nf = 0;
     z->pf = z->iff2;
     z->flags_written = 1;
+    z->ld_a_ir_late_pv = 1;
     break; // ld a,r
 
   case 0x45:
@@ -2185,6 +2270,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
 
     if (get_bc(z) != 0) {
       z->pc -= 2;
+      block_repeat_xy_from_pc(z);
       if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
@@ -2197,6 +2283,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
 
     if (get_bc(z) != 0) {
       z->pc -= 2;
+      block_repeat_xy_from_pc(z);
       if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
@@ -2209,6 +2296,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     cpi(z);
     if (get_bc(z) != 0 && !z->zf) {
       z->pc -= 2;
+      block_repeat_xy_from_pc(z);
       if (cyc_table_now(z)) z->cyc += z->timing->cpir_cpdr_repeat_extra;
       internal_t_states(z, z80_timing_generic.cpir_cpdr_repeat_extra);
       z->mem_ptr = z->pc + 1;
@@ -2218,6 +2306,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     cpd(z);
     if (get_bc(z) != 0 && !z->zf) {
       z->pc -= 2;
+      block_repeat_xy_from_pc(z);
       if (cyc_table_now(z)) z->cyc += z->timing->cpir_cpdr_repeat_extra;
       internal_t_states(z, z80_timing_generic.cpir_cpdr_repeat_extra);
       z->mem_ptr = z->pc + 1;
@@ -2239,25 +2328,29 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     break; // in a, (c)
 
   case 0xA2: ini(z); break; // ini
-  case 0xB2:
-    ini(z);
+  case 0xB2: {
+    uint8_t data = ini(z);
     if (z->b > 0) {
       z->pc -= 2;
+      block_repeat_xy_from_pc(z);
+      block_io_repeat_hp(z, data);
       if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
-    break; // inir
+  } break; // inir
   case 0xAA: ind(z); break; // ind
-  case 0xBA:
-    ind(z);
+  case 0xBA: {
+    uint8_t data = ind(z);
     if (z->b > 0) {
       z->pc -= 2;
+      block_repeat_xy_from_pc(z);
+      block_io_repeat_hp(z, data);
       if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
     }
-    break; // indr
+  } break; // indr
 
   case 0x41:
     port_wr(z, get_bc(z), z->b, false);
@@ -2294,9 +2387,11 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
 
   case 0xA3: outi(z); break; // outi
   case 0xB3: {
-    outi(z);
+    uint8_t data = outi(z);
     if (z->b > 0) {
       z->pc -= 2;
+      block_repeat_xy_from_pc(z);
+      block_io_repeat_hp(z, data);
       if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
@@ -2304,9 +2399,11 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
   } break; // otir
   case 0xAB: outd(z); break; // outd
   case 0xBB: {
-    outd(z);
+    uint8_t data = outd(z);
     if (z->b > 0) {
       z->pc -= 2;
+      block_repeat_xy_from_pc(z);
+      block_io_repeat_hp(z, data);
       if (cyc_table_now(z)) z->cyc += z->timing->block_repeat_extra;
       internal_t_states(z, z80_timing_generic.block_repeat_extra);
       z->mem_ptr = z->pc + 1;
@@ -2434,6 +2531,10 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
 
 void z80_set_timing(z80* const z, const z80_timing_t* timing) {
   z->timing = timing;
+}
+
+void z80_set_vendor(z80* const z, z80_vendor_t vendor) {
+  z->vendor = (unsigned)vendor <= (unsigned)Z80_VENDOR_LAST ? (uint8_t)vendor : Z80_VENDOR_ZILOG;
 }
 
 void z80_set_cyc_source(z80* const z, z80_cyc_source_t source) {

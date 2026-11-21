@@ -60,6 +60,17 @@ typedef enum {
   Z80_CYC_FROM_WAIT_SLOTS = 1
 } z80_cyc_source_t;
 
+// Which manufacturer's behaviour the core reproduces where Z80 parts
+// differ. Timing-free. Zilog NMOS (and NMOS second sources like SGS)
+// and the NEC uPD780C (NMOS) exist; later values are added per vendor.
+typedef enum {
+  Z80_VENDOR_ZILOG = 0, // Zilog NMOS and NMOS second sources (SGS):
+                        // SCF/CCF X/Y = (Q ^ F) | A
+  Z80_VENDOR_NEC = 1, // NEC NMOS (uPD780C): SCF/CCF X/Y = A
+  Z80_VENDOR_LAST = Z80_VENDOR_NEC // highest valid value; move it
+                                  // when a vendor is added
+} z80_vendor_t;
+
 // Kind of bus cycle requested from im0_bus (see struct z80).
 typedef enum {
   Z80_IM0_INTA = 0, // follow-on opcode byte after a prefix (M1 + IORQ cycle)
@@ -114,6 +125,9 @@ struct z80 {
                      // or, in Z80_CYC_FROM_WAIT_SLOTS, one charge per step
                      // from the WAIT-sampled M1 slots (see z80_cyc_source_t)
   const z80_timing_t* timing; // NULL until z80_init() sets z80_timing_generic
+  uint8_t vendor; // z80_vendor_t: which manufacturer's behaviour the core
+                  // reproduces where Z80 parts differ; z80_init() resets
+                  // it to Z80_VENDOR_ZILOG
   z80_cyc_source_t cyc_source; // where the cyc charge comes from (above);
                                // Z80_CYC_FROM_TABLE until z80_set_cyc_source
                                // selects the WAIT-sampled slots
@@ -176,6 +190,15 @@ struct z80 {
   // interrupt; POP AF and EX AF,AF' change F without latching it.
   uint8_t q;
   uint8_t flags_written; // internal: set when the running step writes the flags
+  // Whether LD A,I and LD A,R leave P/V cleared when a maskable
+  // interrupt is accepted at their end. Zilog's CMOS part fixed this
+  // (Zilog Z80 Family Q&A); other vendors' later parts differ.
+  bool nmos_ld_a_ir_bug; // configuration: 1 models the NMOS behaviour
+  // Set by LD A,I and LD A,R: their P/V copy of IFF2 lands after an
+  // interrupt acceptance at the step's end, so an accepted maskable
+  // interrupt leaves P/V cleared. Every step entry clears it, so only
+  // the step that ran one of the two keeps it set.
+  uint8_t ld_a_ir_late_pv; // internal
   uint8_t a, b, c, d, e, h, l; // main registers
   uint8_t a_, b_, c_, d_, e_, h_, l_, f_; // alternate registers
   uint8_t i, r; // interrupt vector, memory refresh
@@ -222,6 +245,7 @@ void z80_debug_output(z80* const z);
 void z80_gen_nmi(z80* const z);
 void z80_gen_int(z80* const z, uint8_t data);
 void z80_set_timing(z80* const z, const z80_timing_t* timing);
+void z80_set_vendor(z80* const z, z80_vendor_t vendor);
 void z80_set_cyc_source(z80* const z, z80_cyc_source_t source);
 
 // Adds n T-states to the running bus cycle from inside one of its

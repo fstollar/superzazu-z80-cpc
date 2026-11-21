@@ -304,6 +304,318 @@ static int run_memptr_test(void) {
   return r != 0;
 }
 
+// MARK: block-instruction repeat X/Y flags
+// pack_qf/seed_qf live with the Q-latch suite further down; declared here
+// so this suite can seed F and read it back as a byte.
+static uint8_t pack_qf(const z80* const z);
+static void seed_qf(z80* const z, uint8_t f);
+// Runs one step of a block instruction at `addr` and checks the full F
+// byte. On a repeating iteration (BC - 1 != 0, and no match for CPIR/CPDR)
+// X/Y come from the rewound PC: bit 11 feeds X, bit 13 feeds Y, where the
+// PC points back at the ED byte. The last iteration (BC reaches 0, or a
+// match) keeps the LDI/CPI formula. Everything besides X/Y is what
+// ldi()/cpi() compute: S/Z/C keep their seeded value, H and N are cleared
+// (LDI) or come from the subtraction (CPI), PV is set while BC is nonzero
+// afterwards. F is seeded with 0 so an untouched flag reads back 0.
+static int check_blockxy(const char* name, const uint8_t* code, uint16_t addr,
+    uint8_t a, uint16_t bc, uint16_t de, uint16_t hl,
+    uint8_t at_hl, uint16_t expected_pc, uint8_t expected_f) {
+  z80 z;
+  z80_init(&z);
+  z.read_byte = rb;
+  z.write_byte = wb;
+  z.port_in = in;
+  z.port_out = out;
+  memset(memory, 0, MEMORY_SIZE);
+  memcpy(&memory[addr], code, 2);
+  memory[hl] = at_hl;
+  z.pc = addr;
+  z.a = a;
+  z.b = (uint8_t)(bc >> 8);
+  z.c = (uint8_t)(bc & 0xFF);
+  z.d = (uint8_t)(de >> 8);
+  z.e = (uint8_t)(de & 0xFF);
+  z.h = (uint8_t)(hl >> 8);
+  z.l = (uint8_t)(hl & 0xFF);
+  seed_qf(&z, 0);
+  // Prefix bytes are their own steps; run to the end of the instruction.
+  // (A repeat rewinds the pc and finishes in the same opcode step, so the
+  // loop ends with pending NONE there too.)
+  do {
+    z80_step(&z);
+  } while (z.pending_prefix != Z80_PREFIX_NONE);
+  int failed = 0;
+  if (z.pc != expected_pc) {
+    printf("*** ERROR %s: PC %04X (expected %04X)\n", name, z.pc,
+        expected_pc);
+    failed = 1;
+  }
+  const uint8_t f = pack_qf(&z);
+  if (f != expected_f) {
+    printf("*** ERROR %s: F %02X (expected %02X)\n", name, f, expected_f);
+    failed = 1;
+  }
+  return failed;
+}
+
+static int run_blockxy_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  static const uint8_t ldir[] = {0xED, 0xB0};
+  static const uint8_t lddr[] = {0xED, 0xB8};
+  static const uint8_t cpir[] = {0xED, 0xB1};
+  static const uint8_t cpdr[] = {0xED, 0xB9};
+  int r = 0;
+  // LDIR repeats: the LDI formula gives X = bit 3 and Y = bit 1 of
+  // (HL) + A, which the PC rule overrides. A = (HL) = FF makes the
+  // formula read 1/1, A = (HL) = 00 makes it read 0/0.
+  r += check_blockxy("ldir repeat xy00", ldir, 0x0000, 0xFF, 2, 0x5000,
+      0x4000, 0xFF, 0x0000, 0x04);
+  r += check_blockxy("ldir repeat xy10", ldir, 0x0800, 0x00, 2, 0x5000,
+      0x4000, 0x00, 0x0800, 0x0C);
+  r += check_blockxy("ldir repeat xy01", ldir, 0x2000, 0x00, 2, 0x5000,
+      0x4000, 0x00, 0x2000, 0x24);
+  r += check_blockxy("ldir repeat xy11", ldir, 0x2800, 0x00, 2, 0x5000,
+      0x4000, 0x00, 0x2800, 0x2C);
+  // LDIR last (BC reaches 0): the LDI formula stands. A = (HL) = 00 gives
+  // formula X/Y = 0/0 while the PC rule at 0x2800 would give 1/1.
+  r += check_blockxy("ldir last", ldir, 0x2800, 0x00, 1, 0x5000, 0x4000,
+      0x00, 0x2802, 0x00);
+  // LDDR repeat overrides the same way; LDDR last keeps the formula. The
+  // 0x0000 repeat uses A = (HL) = FF so the formula reads 1/1 against the
+  // PC rule's 0/0.
+  r += check_blockxy("lddr repeat xy11", lddr, 0x2800, 0x00, 2, 0x5000,
+      0x4000, 0x00, 0x2800, 0x2C);
+  r += check_blockxy("lddr repeat xy00", lddr, 0x0000, 0xFF, 2, 0x5000,
+      0x4000, 0xFF, 0x0000, 0x04);
+  r += check_blockxy("lddr last", lddr, 0x0000, 0xFF, 1, 0x5000, 0x4000,
+      0xFF, 0x0002, 0x28);
+  // CPIR repeats: A = 01 over (HL) = 00 misses with formula X/Y = 0/0;
+  // A = 00 over (HL) = F7 misses with formula X/Y = 1/0 (the subtraction
+  // half-borrows, and X/Y read result - H). N, PV and the half-borrow stay
+  // set, the rest is 0.
+  r += check_blockxy("cpir repeat xy11", cpir, 0x2800, 0x01, 2, 0, 0x4000,
+      0x00, 0x2800, 0x2E);
+  r += check_blockxy("cpir repeat xy00", cpir, 0x0000, 0x00, 2, 0, 0x4000,
+      0xF7, 0x0000, 0x16);
+  // CPIR last by BC or by match: the CPI formula stands (here 0/0), PV
+  // stays set on a match while BC is still nonzero afterwards.
+  r += check_blockxy("cpir last bc", cpir, 0x2800, 0x01, 1, 0, 0x4000,
+      0x00, 0x2802, 0x02);
+  r += check_blockxy("cpir last match", cpir, 0x0000, 0x05, 2, 0, 0x4000,
+      0x05, 0x0002, 0x46);
+  // The same match at 0x2800: the formula still gives X/Y 0/0, while
+  // reading bits 11/13 of the PC on this last iteration would give 1/1.
+  r += check_blockxy("cpir last match 2800", cpir, 0x2800, 0x05, 2, 0, 0x4000,
+      0x05, 0x2802, 0x46);
+  // CPDR repeat overrides the same way; CPDR last by BC or match keeps
+  // the formula. The 0x0000 repeat uses A = 00 over (HL) = F7 so the
+  // formula reads 1/0 against the PC rule's 0/0; the last-bc case uses
+  // A = 08 over (HL) = 00 so the formula reads 1/0 (F 0x0A) against the
+  // PC rule's 0/0 (F 0x02). The last-match case at 0x0000 cannot differ:
+  // a match forces result 0 with no half-borrow, so the formula is 0/0
+  // exactly like the PC rule there.
+  r += check_blockxy("cpdr repeat xy11", cpdr, 0x2800, 0x01, 2, 0, 0x4000,
+      0x00, 0x2800, 0x2E);
+  r += check_blockxy("cpdr repeat xy00", cpdr, 0x0000, 0x00, 2, 0, 0x4000,
+      0xF7, 0x0000, 0x16);
+  r += check_blockxy("cpdr last bc", cpdr, 0x0000, 0x08, 1, 0, 0x4000,
+      0x00, 0x0002, 0x0A);
+  r += check_blockxy("cpdr last match", cpdr, 0x2800, 0x05, 2, 0, 0x4000,
+      0x05, 0x2802, 0x46);
+  // At 0x07FE the pre-rewind PC is 0x0800, so X/Y from PC+2 would read 1/0.
+  r += check_blockxy("ldir repeat 07fe", ldir, 0x07FE, 0x00, 2, 0x5000,
+      0x4000, 0x00, 0x07FE, 0x04);
+  // At 0x27FF MEMPTR lands on 0x2800, so X/Y from PC+1 (MEMPTR) would
+  // read 1/1.
+  r += check_blockxy("ldir repeat 27ff", ldir, 0x27FF, 0x00, 2, 0x5000,
+      0x4000, 0x00, 0x27FF, 0x24);
+  printf("*** block x/y test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
+// MARK: I/O block instruction flags
+// IN r,(C) reports X/Y from the value read (bits 3 and 5). INI/IND/OUTI/
+// OUTD set S/Z/X/Y from the decremented B, N from bit 7 of the port or
+// memory byte, H and C when a 9-bit sum k overflows past 255, and PV from
+// the parity of (k & 7) xor the decremented B, where k pairs the data byte
+// with the neighbouring register: L after the HL step for the OUT pair,
+// C + 1 for INI, C - 1 for IND. A repeating INIR/INDR/OTIR/OTDR iteration
+// instead reports X/Y from bits 11/13 of the rewound PC and adjusts H/PV
+// for the rewind (the extra end-of-instruction states the Z80Decoder notes
+// describe for interrupted block instructions); the last iteration, where
+// B reaches 0, keeps the plain single-step result. Every expected F byte
+// below is the final state of the named SingleStepTests vector, replayed
+// register-for-register (initial B/C/HL, the byte at HL, the port value).
+static uint8_t ioflags_port_val = 0;
+static int ioflags_port_count = 0;
+
+static uint8_t ioflags_in(z80* const z, uint16_t port) {
+  (void)z;
+  (void)port;
+  ioflags_port_count += 1;
+  return ioflags_port_val;
+}
+
+static void ioflags_out(z80* const z, uint16_t port, uint8_t val) {
+  (void)z;
+  (void)port;
+  (void)val;
+  ioflags_port_count += 1;
+}
+
+// Runs one I/O block step at `addr` and checks the full F byte, the PC,
+// and that exactly one port access happened. The data byte comes from the
+// port for the IN pair (ioflags_port_val) and from memory at HL for the
+// OUT pair (at_hl).
+static int check_ioflag(const char* name, const uint8_t* code, uint16_t addr,
+    uint8_t b, uint8_t c, uint16_t hl, uint8_t at_hl, uint8_t port_val,
+    uint16_t expected_pc, uint8_t expected_f) {
+  z80 z;
+  z80_init(&z);
+  z.read_byte = rb;
+  z.write_byte = wb;
+  z.port_in = ioflags_in;
+  z.port_out = ioflags_out;
+  memset(memory, 0, MEMORY_SIZE);
+  memcpy(&memory[addr], code, 2);
+  memory[hl] = at_hl;
+  z.pc = addr;
+  z.b = b;
+  z.c = c;
+  z.h = (uint8_t)(hl >> 8);
+  z.l = (uint8_t)(hl & 0xFF);
+  ioflags_port_val = port_val;
+  ioflags_port_count = 0;
+  seed_qf(&z, 0);
+  // Prefix bytes are their own steps; run to the end of the instruction.
+  // (A repeat rewinds the pc and finishes in the same opcode step, so the
+  // loop ends with pending NONE there too.)
+  do {
+    z80_step(&z);
+  } while (z.pending_prefix != Z80_PREFIX_NONE);
+  int failed = 0;
+  if (z.pc != expected_pc) {
+    printf("*** ERROR %s: PC %04X (expected %04X)\n", name, z.pc,
+        expected_pc);
+    failed = 1;
+  }
+  const uint8_t f = pack_qf(&z);
+  if (f != expected_f) {
+    printf("*** ERROR %s: F %02X (expected %02X)\n", name, f, expected_f);
+    failed = 1;
+  }
+  if (ioflags_port_count != 1) {
+    printf("*** ERROR %s: %d port accesses (expected 1)\n", name,
+        ioflags_port_count);
+    failed = 1;
+  }
+  return failed;
+}
+
+static int run_ioflags_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  static const uint8_t in_b_c[] = {0xED, 0x40};
+  static const uint8_t ini[] = {0xED, 0xA2};
+  static const uint8_t inir[] = {0xED, 0xB2};
+  static const uint8_t ind[] = {0xED, 0xAA};
+  static const uint8_t indr[] = {0xED, 0xBA};
+  static const uint8_t outi[] = {0xED, 0xA3};
+  static const uint8_t otir[] = {0xED, 0xB3};
+  static const uint8_t outd[] = {0xED, 0xAB};
+  static const uint8_t otdr[] = {0xED, 0xBB};
+  int r = 0;
+  // IN B,(C): X/Y read bits 3/5 of the port value (here 92 = 5C, bit 3
+  // set and bit 5 clear, so a swapped X/Y reads back 24). The M5 mutant
+  // (no X/Y) reports 0/0 and reads F 04.
+  r += check_ioflag("in b,(c) xy", in_b_c, 0xF54A, 120, 9, 0xBF28, 0,
+      92, 0xF54C, 0x0C); // SingleStepTests "ED 40 0001"
+  // INI: k = data + (C + 1); H/C set past 255, PV from (k & 7) ^ B.
+  r += check_ioflag("ini k over", ini, 0x5CB7, 64, 237, 0x72D5, 0, 117,
+      0x5CB9, 0x3D); // SingleStepTests "ED A2 0001", k = 355
+  r += check_ioflag("ini k within", ini, 0xD3A9, 102, 98, 0x550F, 0, 91,
+      0xD3AB, 0x24); // SingleStepTests "ED A2 0000", k = 190
+  // INI with data + C == 255: the M2 mutant (C instead of C + 1 in k)
+  // misses the carry and reads H/C 0/0 (F 87).
+  r += check_ioflag("ini c plus one", ini, 0x8315, 131, 17, 0xB73D, 0, 238,
+      0x8317, 0x97); // SingleStepTests "ED A2 0342", k = 256
+  // IND: k = data + (C - 1).
+  r += check_ioflag("ind k over", ind, 0x0251, 41, 156, 0xF2B0, 0, 198,
+      0x0253, 0x3B); // SingleStepTests "ED AA 0003", k = 353
+  r += check_ioflag("ind k within", ind, 0x90BE, 250, 136, 0xAAB0, 0, 41,
+      0x90C0, 0xAC); // SingleStepTests "ED AA 0000", k = 176
+  // OUTI: k = data + L after the HL increment.
+  r += check_ioflag("outi k over", outi, 0xCA85, 216, 10, 0x0590, 242, 0,
+      0xCA87, 0x97); // SingleStepTests "ED A3 0000", k = 387
+  r += check_ioflag("outi k within", outi, 0x9301, 56, 143, 0xD340, 156, 0,
+      0x9303, 0x22); // SingleStepTests "ED A3 0001", k = 221
+  // OUTI with data + L == 255 before the increment: the M1 mutant (the
+  // old L in k) misses the carry and reads H/C 0/0 (F 07).
+  r += check_ioflag("outi incremented l", outi, 0xDEFF, 121, 199, 0xF151,
+      174, 0, 0xDF01, 0x3F); // SingleStepTests "ED A3 00E6", k = 256
+  // OUTD: k = data + L after the HL decrement.
+  r += check_ioflag("outd k over", outd, 0xF722, 221, 88, 0xC9FB, 192, 0,
+      0xF724, 0x9F); // SingleStepTests "ED AB 0001", k = 442
+  r += check_ioflag("outd k within", outd, 0xBA1C, 217, 147, 0xDE11, 208, 0,
+      0xBA1E, 0x8E); // SingleStepTests "ED AB 0000", k = 224
+  // INIR repeats: X/Y from bits 11/13 of the rewound PC, H/PV adjusted
+  // for the rewind, in every carry/data-bit-7 combination. The M3 mutant
+  // (no H/PV change) keeps the plain single-step H/PV here.
+  r += check_ioflag("inir repeat carry data80", inir, 0x5F7E, 255, 216,
+      0xA02C, 0, 172, 0x5F7E, 0x8B); // SingleStepTests "ED B2 0007"
+  r += check_ioflag("inir repeat carry dataclear", inir, 0x7BD7, 109, 157,
+      0x13B2, 0, 118, 0x7BD7, 0x29); // SingleStepTests "ED B2 0000"
+  r += check_ioflag("inir repeat nocarry data80", inir, 0x361D, 50, 55,
+      0x42E9, 0, 154, 0x361D, 0x22); // SingleStepTests "ED B2 0001"
+  r += check_ioflag("inir repeat nocarry dataclear", inir, 0x8B51, 213, 22,
+      0x4A2E, 0, 26, 0x8B51, 0x8C); // SingleStepTests "ED B2 0003"
+  // At 0x07FF the pre-rewind PC is 0x0801, so X/Y from the next PC instead
+  // of the rewound one (the M4 mutant) would read 1/0.
+  r += check_ioflag("inir repeat next-pc xy", inir, 0x07FF, 143, 41, 0x50E6,
+      0, 86, 0x07FF, 0x84); // SingleStepTests "ED B2 0370"
+  // INIR last (B reaches 0): the plain INI result stands.
+  r += check_ioflag("inir last", inir, 0xB829, 1, 216, 0x3336, 0, 198,
+      0xB82B, 0x53); // SingleStepTests "ED B2 004B"
+  // INDR repeat with the carry set (k = 394): the plain rule gives H/PV
+  // 1/1 (F 9F); the repeat change clears both.
+  r += check_ioflag("indr repeat carry", indr, 0x9F58, 252, 212,
+      0xBBB2, 0, 183, 0x9F58, 0x8B); // SingleStepTests "ED BA 0001"
+  // OTIR repeat with the carry set (k = 362): the plain rule gives H = 1
+  // (F 97); the repeat change clears it.
+  r += check_ioflag("otir repeat carry", otir, 0x10EE, 186, 250,
+      0xB4A3, 198, 0, 0x10EE, 0x87); // SingleStepTests "ED B3 0001"
+  // OTDR repeats: the same four combinations for the OUT pair.
+  r += check_ioflag("otdr repeat carry data80", otdr, 0xDD5F, 225, 160,
+      0x125C, 213, 0, 0xDD5F, 0x9F); // SingleStepTests "ED BB 0000"
+  r += check_ioflag("otdr repeat carry dataclear", otdr, 0x7D6C, 252, 106,
+      0xD6AA, 125, 0, 0x7D6C, 0xAD); // SingleStepTests "ED BB 0003"
+  r += check_ioflag("otdr repeat nocarry data80", otdr, 0x52BF, 207, 184,
+      0xF013, 162, 0, 0x52BF, 0x86); // SingleStepTests "ED BB 0001"
+  r += check_ioflag("otdr repeat nocarry dataclear", otdr, 0x0BE5, 20, 165,
+      0xD9AE, 39, 0, 0x0BE5, 0x0C); // SingleStepTests "ED BB 0004"
+  // At 0x6FFE the pre-rewind PC is 0x7000, so X/Y from the next PC (the
+  // M4 mutant) would read 0/1 instead of 1/1.
+  r += check_ioflag("otdr repeat next-pc xy", otdr, 0x6FFE, 137, 186,
+      0x2BAB, 133, 0, 0x6FFE, 0xAF); // SingleStepTests "ED BB 019A"
+  // OTDR last (B reaches 0): the plain OUTD result stands. The corpus
+  // holds no OTDR vector with B reaching 0, so this replays "ED AB 0274"
+  // (an OUTD vector with initial B 1) under the OTDR opcode: outd() runs
+  // once and the repeat branch is not taken. k = 285 overflows and the PC
+  // has bit 11 set, so adjusting H/PV or X/Y on the last iteration (as a
+  // repeat would) shows: X reads back 1, PV flips to 0 (F 57 expected).
+  r += check_ioflag("otdr last", otdr, 0x8850, 1, 239, 0x5E8F, 143, 0,
+      0x8852, 0x57);
+  printf("*** io block flags test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
 // MARK: interrupt after EI
 // No interrupt is accepted at the boundary right after EI, only after the
 // instruction that follows it (z80-documented section 5.5). A host that
@@ -1741,6 +2053,411 @@ static int check_ccf_after_ld(void) {
   return 0;
 }
 
+// z80_init() resets the vendor to Zilog, even after a value only a
+// later vendor holds was stored in the field directly.
+static int check_vendor_init_reset(void) {
+  const char* name = "init resets vendor";
+  z80 z;
+  z80_init(&z);
+  z.vendor = 0xA5;
+  z80_init(&z);
+  if (z.vendor != Z80_VENDOR_ZILOG) {
+    printf("*** ERROR %s: vendor %02X (expected 00)\n", name, z.vendor);
+    return 1;
+  }
+  return 0;
+}
+
+// A zero-initialised struct reads as Zilog: the field is 0, and SCF
+// with Q 0, F 0x28 and A 0 sets X/Y (F 0x29). The timing table is
+// attached by hand; only the vendor reading is under test.
+static int check_vendor_zero_init(void) {
+  const char* name = "zero init reads as zilog";
+  z80 z;
+  memset(&z, 0, sizeof z);
+  if (z.vendor != Z80_VENDOR_ZILOG) {
+    printf("*** ERROR %s: vendor %02X (expected 00)\n", name, z.vendor);
+    return 1;
+  }
+  z.timing = &z80_timing_generic;
+  z.read_byte = rb;
+  z.write_byte = wb;
+  z.port_in = in;
+  z.port_out = out;
+  memset(memory, 0, MEMORY_SIZE);
+  memory[0x0000] = 0x37; // scf
+  z.pc = 0;
+  z.sp = 0xF000;
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x29 || z.q != 0x29) {
+    printf("*** ERROR %s: q %02X f %02X (expected 29 29)\n", name, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// Out-of-range values clamp to Zilog, and the clamped core still runs
+// the Zilog X/Y rule.
+static int check_vendor_clamp(void) {
+  const char* name = "set vendor clamps";
+  z80 z;
+  init_q_cpu(&z);
+  // Derived from the last valid value, so later vendors need not edit
+  // this list: the first two are the nearest out-of-range values, the
+  // rest are wide and negative (as unsigned) bit patterns.
+  static const uint8_t bad[] = {
+    (uint8_t)(Z80_VENDOR_LAST + 1), (uint8_t)(Z80_VENDOR_LAST + 2),
+    7, 0x7F, 0xFF, (uint8_t)(z80_vendor_t)-1
+  };
+  size_t i;
+  for (i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+    z80_set_vendor(&z, (z80_vendor_t)bad[i]);
+    if (z.vendor != Z80_VENDOR_ZILOG) {
+      printf("*** ERROR %s: vendor %02X after setting %02X (expected 00)\n",
+          name, z.vendor, bad[i]);
+      return 1;
+    }
+  }
+  z80_set_vendor(&z, Z80_VENDOR_ZILOG);
+  if (z.vendor != Z80_VENDOR_ZILOG) {
+    printf("*** ERROR %s: vendor %02X (expected 00)\n", name, z.vendor);
+    return 1;
+  }
+  memory[0x0000] = 0x37; // scf
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z.q = 0;
+  z80_step(&z);
+  if (pack_qf(&z) != 0x29 || z.q != 0x29) {
+    printf("*** ERROR %s: q %02X f %02X (expected 29 29)\n", name, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// SCF with Q 0, F 0x28 and A 0: the Zilog rule keeps X/Y set (F 0x29),
+// with C set and H/N clear.
+static int check_scf_q_zero_xy(void) {
+  const char* name = "ld b,0 ; scf with f 28 (zilog)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x06; // ld b,n
+  memory[0x0001] = 0x00;
+  memory[0x0002] = 0x37; // scf
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_ZILOG);
+  z80_step(&z);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x29 || z.q != 0x29 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 29 29)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// CCF with Q 0, F 0x28 (C clear) and A 0: H takes the old C (0), C
+// sets, X/Y stay set (F 0x29), N clear.
+static int check_ccf_q_zero_xy(void) {
+  const char* name = "ld b,0 ; ccf with f 28 (zilog)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x06; // ld b,n
+  memory[0x0001] = 0x00;
+  memory[0x0002] = 0x3F; // ccf
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_ZILOG);
+  z80_step(&z);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x29 || z.q != 0x29 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 29 29)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// CCF after a flag writer reads Q == F: BIT 3,B leaves F 0x18, so
+// (Q ^ F) | A is 0 and CCF's X/Y come out clear (F 0x01).
+static int check_ccf_after_bit(void) {
+  const char* name = "bit 3,b ; ccf (zilog)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xCB;
+  memory[0x0001] = 0x58; // bit 3,b
+  memory[0x0002] = 0x3F; // ccf
+  z.a = 0;
+  seed_qf(&z, 0);
+  z.b = 0x08;
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_ZILOG);
+  z80_step(&z); // CB prefix
+  z80_step(&z); // bit 3,b
+  z80_step(&z); // ccf
+  if (pack_qf(&z) != 0x01 || z.q != 0x01 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 01 01)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// DD SCF after a flag writer reads Q 0 anyway: the prefix byte clears
+// the latched F 0x28, so with A 0 the Zilog rule keeps X/Y set
+// (F 0x29).
+static int check_dd_scf_after_flag_writer(void) {
+  const char* name = "flag writer ; dd 37 (zilog)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xDD;
+  memory[0x0001] = 0x37; // scf
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z.q = 0x28; // as if a flag writer left F 0x28 latched
+  z80_set_vendor(&z, Z80_VENDOR_ZILOG);
+  z80_step(&z); // DD prefix step: clears Q
+  z80_step(&z); // SCF itself
+  if (pack_qf(&z) != 0x29 || z.q != 0x29 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 29 29)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// SCF with A 0x28, F 0 and Q 0: A alone sets X/Y (F 0x29), with C set
+// and H/N clear.
+static int check_scf_a_xy(void) {
+  const char* name = "ld b,0 ; scf with a 28 (zilog)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x06; // ld b,n
+  memory[0x0001] = 0x00;
+  memory[0x0002] = 0x37; // scf
+  z.a = 0x28;
+  seed_qf(&z, 0x00);
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_ZILOG);
+  z80_step(&z);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x29 || z.q != 0x29 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 29 29)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// OUT (C),0 sends 0x00 on the Zilog behaviour. Only the later CMOS
+// values change it, but this pins the untouched path against a send-0xFF
+// regression.
+static int check_ed71_sends_zero(void) {
+  const char* name = "out (c),0 (zilog)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x71; // out (c),0
+  z.b = 0x12;
+  z.c = 0x34;
+  z80_set_vendor(&z, Z80_VENDOR_ZILOG);
+  z.port_out = record_out;
+  out_count = 0;
+  z80_step(&z); // ED prefix
+  z80_step(&z); // out (c),0
+  if (out_count != 1 || last_out_port != 0x1234 || last_out_val != 0x00) {
+    printf("*** ERROR %s: count %d port %04X val %02X (expected 1 1234 00)\n",
+        name, out_count, last_out_port, last_out_val);
+    return 1;
+  }
+  return 0;
+}
+
+// SCF with Q 0, F 0x28 and A 0 on the NEC behaviour: the uPD780C takes
+// X/Y from A alone, so both come out clear (F 0x01), with C set and H/N
+// clear.
+static int check_scf_q_zero_xy_nec(void) {
+  const char* name = "ld b,0 ; scf with f 28 (nec)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x06; // ld b,n
+  memory[0x0001] = 0x00;
+  memory[0x0002] = 0x37; // scf
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
+  z80_step(&z);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x01 || z.q != 0x01 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 01 01)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// CCF with Q 0, F 0x28 (C clear) and A 0 on the NEC behaviour: H takes
+// the old C (0), C sets, X/Y come out clear (F 0x01), N clear.
+static int check_ccf_q_zero_xy_nec(void) {
+  const char* name = "ld b,0 ; ccf with f 28 (nec)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x06; // ld b,n
+  memory[0x0001] = 0x00;
+  memory[0x0002] = 0x3F; // ccf
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
+  z80_step(&z);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x01 || z.q != 0x01 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 01 01)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// SCF after a flag writer on the NEC behaviour reads Q == F: BIT 3,B
+// leaves F 0x18, so A alone (0) sets X/Y and SCF's X/Y come out clear
+// (F 0x01).
+static int check_scf_after_bit_nec(void) {
+  const char* name = "bit 3,b ; scf (nec)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xCB;
+  memory[0x0001] = 0x58; // bit 3,b
+  memory[0x0002] = 0x37; // scf
+  z.a = 0;
+  seed_qf(&z, 0);
+  z.b = 0x08;
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
+  z80_step(&z); // CB prefix
+  z80_step(&z); // bit 3,b
+  z80_step(&z); // scf
+  if (pack_qf(&z) != 0x01 || z.q != 0x01 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 01 01)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// CCF after a flag writer on the NEC behaviour: same Q == F shape, so
+// X/Y come out clear (F 0x01).
+static int check_ccf_after_bit_nec(void) {
+  const char* name = "bit 3,b ; ccf (nec)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xCB;
+  memory[0x0001] = 0x58; // bit 3,b
+  memory[0x0002] = 0x3F; // ccf
+  z.a = 0;
+  seed_qf(&z, 0);
+  z.b = 0x08;
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
+  z80_step(&z); // CB prefix
+  z80_step(&z); // bit 3,b
+  z80_step(&z); // ccf
+  if (pack_qf(&z) != 0x01 || z.q != 0x01 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 01 01)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// DD SCF after a flag writer on the NEC behaviour reads Q 0 anyway: the
+// prefix byte clears the latched F 0x28, so with A 0 X/Y come out clear
+// (F 0x01).
+static int check_dd_scf_after_flag_writer_nec(void) {
+  const char* name = "flag writer ; dd 37 (nec)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xDD;
+  memory[0x0001] = 0x37; // scf
+  z.a = 0;
+  seed_qf(&z, 0x28);
+  z.q = 0x28; // as if a flag writer left F 0x28 latched
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
+  z80_step(&z); // DD prefix step: clears Q
+  z80_step(&z); // SCF itself
+  if (pack_qf(&z) != 0x01 || z.q != 0x01 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 01 01)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// SCF with A 0x28, F 0 and Q 0 on the NEC behaviour: A alone sets X/Y
+// (F 0x29), with C set and H/N clear.
+static int check_scf_a_xy_nec(void) {
+  const char* name = "ld b,0 ; scf with a 28 (nec)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0x06; // ld b,n
+  memory[0x0001] = 0x00;
+  memory[0x0002] = 0x37; // scf
+  z.a = 0x28;
+  seed_qf(&z, 0x00);
+  z.q = 0xA5;
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
+  z80_step(&z);
+  z80_step(&z);
+  if (pack_qf(&z) != 0x29 || z.q != 0x29 || !z.cf || z.hf || z.nf) {
+    printf("*** ERROR %s: c %d h %d n %d q %02X f %02X"
+        " (expected 1 0 0 29 29)\n", name, z.cf, z.hf, z.nf, z.q,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// OUT (C),0 sends 0x00 on the NEC behaviour too: the uPD780C is NMOS
+// and keeps the Zilog value.
+static int check_ed71_sends_zero_nec(void) {
+  const char* name = "out (c),0 (nec)";
+  z80 z;
+  init_q_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x71; // out (c),0
+  z.b = 0x12;
+  z.c = 0x34;
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
+  z.port_out = record_out;
+  out_count = 0;
+  z80_step(&z); // ED prefix
+  z80_step(&z); // out (c),0
+  if (out_count != 1 || last_out_port != 0x1234 || last_out_val != 0x00) {
+    printf("*** ERROR %s: count %d port %04X val %02X (expected 1 1234 00)\n",
+        name, out_count, last_out_port, last_out_val);
+    return 1;
+  }
+  return 0;
+}
+
 // Accepting a maskable interrupt drops the running instruction's flag
 // state even when that instruction wrote the flags (ADD leaves F
 // 0x51): Q is 0 afterwards.
@@ -1818,10 +2535,440 @@ static int run_qlatch_test(void) {
   r += check_scf_after_pop_af();
   r += check_dd_scf_clears_q();
   r += check_ccf_after_ld();
+  r += check_vendor_init_reset();
+  r += check_vendor_zero_init();
+  r += check_vendor_clamp();
+  r += check_scf_q_zero_xy();
+  r += check_ccf_q_zero_xy();
+  r += check_ccf_after_bit();
+  r += check_dd_scf_after_flag_writer();
+  r += check_scf_a_xy();
+  r += check_ed71_sends_zero();
+  r += check_scf_q_zero_xy_nec();
+  r += check_ccf_q_zero_xy_nec();
+  r += check_scf_after_bit_nec();
+  r += check_ccf_after_bit_nec();
+  r += check_dd_scf_after_flag_writer_nec();
+  r += check_scf_a_xy_nec();
+  r += check_ed71_sends_zero_nec();
   r += check_q_after_int();
   r += check_q_after_nmi();
   r += check_q_after_halt();
   printf("*** q latch test: %s\n", r == 0 ? "OK" : "FAILED");
+  free(memory);
+  return r != 0;
+}
+
+// MARK: NMOS LD A,I / LD A,R P/V bug
+// On the NMOS part LD A,I and LD A,R copy IFF2 into P/V only after an
+// interrupt acceptance at their end has cleared IFF2, so an accepted
+// maskable interrupt leaves P/V = 0. Nothing else changes: an interrupt
+// that is merely pending, an NMI, or any later instruction leaves the
+// copied IFF2 alone.
+static void init_ldair_cpu(z80* const z) {
+  init_ei_cpu(z);
+  z->iff1 = 1;
+  z->iff2 = 1;
+  z->i = 0x80;
+  seed_qf(z, 0x01); // C is kept through LD A,I/R; P/V is seeded clear
+}
+
+// LD A,I with an INT accepted at its end: taken to 0x38 with return
+// 0x0002, A reads I, and P/V is clear although IFF2 was set.
+static int check_ldair_int_taken(void) {
+  const char* name = "ld a,i with int accepted";
+  z80 z;
+  init_ldair_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z); // ED prefix step: the interrupt stays held
+  z80_step(&z); // ld a,i: taken at its end
+  int r = expect_taken(name, &z, 0x0002);
+  if (z.a != 0x80 || pack_qf(&z) != 0x81 || z.q != 0) {
+    printf("*** ERROR %s: a %02X q %02X f %02X (expected 80 00 81)\n",
+        name, z.a, z.q, pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// LD A,I with an INT accepted at its end on the NEC behaviour: the
+// uPD780C is NMOS, so P/V is clear although IFF2 was set.
+static int check_ldair_int_taken_nec(void) {
+  const char* name = "ld a,i with int accepted (nec)";
+  z80 z;
+  init_ldair_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_set_vendor(&z, Z80_VENDOR_NEC);
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z); // ED prefix step: the interrupt stays held
+  z80_step(&z); // ld a,i: taken at its end
+  int r = expect_taken(name, &z, 0x0002);
+  if (z.a != 0x80 || pack_qf(&z) != 0x81 || z.q != 0) {
+    printf("*** ERROR %s: a %02X q %02X f %02X (expected 80 00 81)\n",
+        name, z.a, z.q, pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// The control: without an interrupt LD A,I copies the set IFF2, so P/V
+// stays set (S = 1 from A, C kept).
+static int check_ldair_no_int(void) {
+  const char* name = "ld a,i without int";
+  z80 z;
+  init_ldair_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_step(&z);
+  z80_step(&z);
+  if (z.pc != 0x0002 || z.int_pending || z.a != 0x80 ||
+      pack_qf(&z) != 0x85) {
+    printf("*** ERROR %s: pc %04X pending %d a %02X f %02X"
+        " (expected 0002 0 80 85)\n", name, z.pc, z.int_pending, z.a,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// The host path: the step ends first and the host takes the interrupt
+// afterwards with z80_check_interrupt(). P/V is still cleared, so the
+// rule lives at acceptance, not at instruction end.
+static int check_ldair_host_check(void) {
+  const char* name = "ld a,i with host-side accept";
+  z80 z;
+  init_ldair_cpu(&z);
+  z.int_check_by_host = 1;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_step(&z); // ED prefix step
+  z80_check_interrupt(&z); // nothing pending
+  z80_step(&z); // ld a,i runs with P/V set
+  z80_gen_int(&z, 0xFF); // raised after the step
+  z80_check_interrupt(&z); // taken here
+  int r = expect_taken(name, &z, 0x0002);
+  if (z.a != 0x80 || pack_qf(&z) != 0x81) {
+    printf("*** ERROR %s: a %02X f %02X (expected 80 81)\n", name, z.a,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// EI holds the interrupt off through its own boundary; it is taken at
+// the end of LD A,I instead, with P/V clear.
+static int check_ldair_after_ei(void) {
+  const char* name = "ei ; ld a,i";
+  z80 z;
+  init_ldair_cpu(&z);
+  memory[0x0000] = 0xFB; // ei
+  memory[0x0001] = 0xED;
+  memory[0x0002] = 0x57; // ld a,i
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z); // ei
+  if (expect_held(name, "after EI", &z, 0x0001)) {
+    return 1;
+  }
+  z80_step(&z); // ED prefix step
+  if (expect_held(name, "after the ED step", &z, 0x0002)) {
+    return 1;
+  }
+  z80_step(&z); // ld a,i: taken at its end
+  int r = expect_taken(name, &z, 0x0003);
+  if (z.a != 0x80 || pack_qf(&z) != 0x81) {
+    printf("*** ERROR %s: a %02X f %02X (expected 80 81)\n", name, z.a,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// LD A,R behaves the same: the ED and 5F steps refresh R from 0x10 to
+// 0x12, A reads that back, the acknowledge fetch refreshes R once more,
+// and the accepted INT clears P/V.
+static int check_ldair_ld_a_r(void) {
+  const char* name = "ld a,r with int accepted";
+  z80 z;
+  init_ldair_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x5F; // ld a,r
+  z.r = 0x10;
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  z80_step(&z);
+  int r = expect_taken(name, &z, 0x0002);
+  if (z.a != 0x12 || z.r != 0x13 || pack_qf(&z) != 0x01) {
+    printf("*** ERROR %s: a %02X r %02X f %02X (expected 12 13 01)\n",
+        name, z.a, z.r, pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// The window ends at once: an INT raised after LD A,I's step is taken
+// after the NOP that follows, with P/V still set.
+static int check_ldair_after_nop(void) {
+  const char* name = "ld a,i ; nop with late int";
+  z80 z;
+  init_ldair_cpu(&z);
+  z.int_check_by_host = 1;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  memory[0x0002] = 0x00; // nop
+  z80_step(&z);
+  z80_check_interrupt(&z);
+  z80_step(&z);
+  z80_check_interrupt(&z); // P/V set, nothing pending
+  if (z.a != 0x80 || pack_qf(&z) != 0x85) {
+    printf("*** ERROR %s: a %02X f %02X after ld a,i (expected 80 85)\n",
+        name, z.a, pack_qf(&z));
+    return 1;
+  }
+  z80_gen_int(&z, 0xFF); // raised after LD A,I's step
+  z80_step(&z); // nop
+  z80_check_interrupt(&z); // taken here
+  int r = expect_taken(name, &z, 0x0003);
+  if (z.a != 0x80 || pack_qf(&z) != 0x85) {
+    printf("*** ERROR %s: a %02X f %02X (expected 80 85)\n", name, z.a,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// An NMI at the end of LD A,I leaves P/V alone: it only clears IFF1,
+// so the late copy still reads the set IFF2.
+static int check_ldair_nmi(void) {
+  const char* name = "ld a,i with nmi";
+  z80 z;
+  init_ldair_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_gen_nmi(&z);
+  z80_step(&z);
+  z80_step(&z);
+  if (z.pc != 0x0066 || z.nmi_pending || pushed_return(&z) != 0x0002 ||
+      !z.iff2 || z.iff1 || z.a != 0x80 || pack_qf(&z) != 0x85) {
+    printf("*** ERROR %s: pc %04X return %04X nmi %d iff1 %d iff2 %d"
+        " a %02X f %02X (expected 0066 0002 0 0 1 80 85)\n", name, z.pc,
+        pushed_return(&z), z.nmi_pending, z.iff1, z.iff2, z.a,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// With both pending the NMI wins at LD A,I's end with P/V set, and the
+// INT stays pending (IFF1 is clear).
+static int check_ldair_nmi_and_int(void) {
+  const char* name = "ld a,i with nmi and int";
+  z80 z;
+  init_ldair_cpu(&z);
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_gen_nmi(&z);
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  z80_step(&z);
+  if (z.pc != 0x0066 || pushed_return(&z) != 0x0002 || !z.int_pending ||
+      !z.iff2 || z.iff1 || z.a != 0x80 || pack_qf(&z) != 0x85) {
+    printf("*** ERROR %s: pc %04X return %04X int %d iff1 %d iff2 %d"
+        " a %02X f %02X (expected 0066 0002 1 0 1 80 85)\n", name, z.pc,
+        pushed_return(&z), z.int_pending, z.iff1, z.iff2, z.a,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// The configuration switch: with the NMOS behaviour off, an accepted
+// INT leaves the copied IFF2 alone.
+static int check_ldair_bug_off(void) {
+  const char* name = "ld a,i with int accepted, bug off";
+  z80 z;
+  init_ldair_cpu(&z);
+  z.nmos_ld_a_ir_bug = 0;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  z80_step(&z);
+  int r = expect_taken(name, &z, 0x0002);
+  if (z.a != 0x80 || pack_qf(&z) != 0x85) {
+    printf("*** ERROR %s: a %02X f %02X (expected 80 85)\n", name, z.a,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// Inside an NMI handler (IFF1 clear, IFF2 set) no INT is accepted, so
+// P/V keeps IFF2 even with one pending.
+static int check_ldair_iff1_clear(void) {
+  const char* name = "ld a,i with iff1 clear";
+  z80 z;
+  init_ldair_cpu(&z);
+  z.iff1 = 0;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  z80_step(&z);
+  if (expect_held(name, "after ld a,i", &z, 0x0002)) {
+    return 1;
+  }
+  if (z.a != 0x80 || pack_qf(&z) != 0x85 || !z.iff2) {
+    printf("*** ERROR %s: a %02X f %02X iff2 %d (expected 80 85 1)\n",
+        name, z.a, pack_qf(&z), z.iff2);
+    return 1;
+  }
+  return 0;
+}
+
+// IM 0 with 0xFF on the bus (RST 38) clears P/V the same way.
+static int check_ldair_im0(void) {
+  const char* name = "ld a,i with int accepted in im 0";
+  z80 z;
+  init_ldair_cpu(&z);
+  z.interrupt_mode = 0;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  z80_gen_int(&z, 0xFF); // rst 38
+  z80_step(&z);
+  z80_step(&z);
+  int r = expect_taken(name, &z, 0x0002);
+  if (z.a != 0x80 || pack_qf(&z) != 0x81) {
+    printf("*** ERROR %s: a %02X f %02X (expected 80 81)\n", name, z.a,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// IM 2 through a vector table at I:20h (I stays 0x80) clears P/V too.
+static int check_ldair_im2(void) {
+  const char* name = "ld a,i with int accepted in im 2";
+  z80 z;
+  init_ldair_cpu(&z);
+  z.interrupt_mode = 2;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  memory[0x8020] = 0x34;
+  memory[0x8021] = 0x12;
+  z80_gen_int(&z, 0x20);
+  z80_step(&z);
+  z80_step(&z);
+  if (z.pc != 0x1234 || z.int_pending || pushed_return(&z) != 0x0002 ||
+      z.iff1 || z.iff2 || z.a != 0x80 || pack_qf(&z) != 0x81) {
+    printf("*** ERROR %s: pc %04X return %04X int %d iff1 %d iff2 %d"
+        " a %02X f %02X (expected 1234 0002 0 0 0 80 81)\n", name, z.pc,
+        pushed_return(&z), z.int_pending, z.iff1, z.iff2, z.a,
+        pack_qf(&z));
+    return 1;
+  }
+  return 0;
+}
+
+// LD I,A sets no late flag: an accepted INT leaves the seeded P/V set.
+static int check_ldair_ld_i_a(void) {
+  const char* name = "ld i,a with int accepted";
+  z80 z;
+  init_ldair_cpu(&z);
+  seed_qf(&z, 0x04); // P/V seeded set
+  z.a = 0x55;
+  z.i = 0x00;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x47; // ld i,a
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  z80_step(&z);
+  int r = expect_taken(name, &z, 0x0002);
+  if (z.i != 0x55 || pack_qf(&z) != 0x04) {
+    printf("*** ERROR %s: i %02X f %02X (expected 55 04)\n", name, z.i,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// Any other flag writer is untouched: XOR A sets P/V by parity and the
+// accepted INT keeps it.
+static int check_ldair_other_flags(void) {
+  const char* name = "xor a with int accepted";
+  z80 z;
+  init_ldair_cpu(&z);
+  seed_qf(&z, 0x00);
+  z.a = 0xFF;
+  memory[0x0000] = 0xAF; // xor a
+  z80_gen_int(&z, 0xFF);
+  z80_step(&z);
+  int r = expect_taken(name, &z, 0x0001);
+  if (z.a != 0x00 || pack_qf(&z) != 0x44) {
+    printf("*** ERROR %s: a %02X f %02X (expected 00 44)\n", name, z.a,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+// A prefix step ends the window: the INT raised after LD A,I is held
+// through the DD prefix step and taken after DD 00, with P/V still set.
+static int check_ldair_prefix_boundary(void) {
+  const char* name = "ld a,i ; dd nop with late int";
+  z80 z;
+  init_ldair_cpu(&z);
+  z.int_check_by_host = 1;
+  memory[0x0000] = 0xED;
+  memory[0x0001] = 0x57; // ld a,i
+  memory[0x0002] = 0xDD;
+  memory[0x0003] = 0x00; // dd nop
+  z80_step(&z);
+  z80_check_interrupt(&z);
+  z80_step(&z);
+  z80_check_interrupt(&z);
+  z80_gen_int(&z, 0xFF); // raised after LD A,I's step
+  z80_step(&z); // DD prefix step
+  z80_check_interrupt(&z);
+  if (expect_held(name, "after the DD step", &z, 0x0003)) {
+    return 1;
+  }
+  z80_step(&z); // dd nop
+  z80_check_interrupt(&z); // taken here
+  int r = expect_taken(name, &z, 0x0004);
+  if (z.a != 0x80 || pack_qf(&z) != 0x85) {
+    printf("*** ERROR %s: a %02X f %02X (expected 80 85)\n", name, z.a,
+        pack_qf(&z));
+    r = 1;
+  }
+  return r;
+}
+
+static int run_ld_a_ir_bug_test(void) {
+  memory = malloc(MEMORY_SIZE);
+  if (memory == NULL) {
+    return 1;
+  }
+  int r = 0;
+  r += check_ldair_int_taken();
+  r += check_ldair_int_taken_nec();
+  r += check_ldair_no_int();
+  r += check_ldair_host_check();
+  r += check_ldair_after_ei();
+  r += check_ldair_ld_a_r();
+  r += check_ldair_after_nop();
+  r += check_ldair_nmi();
+  r += check_ldair_nmi_and_int();
+  r += check_ldair_bug_off();
+  r += check_ldair_iff1_clear();
+  r += check_ldair_im0();
+  r += check_ldair_im2();
+  r += check_ldair_ld_i_a();
+  r += check_ldair_other_flags();
+  r += check_ldair_prefix_boundary();
+  printf("*** ld a,i/r interrupt test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);
   return r != 0;
 }
@@ -3266,6 +4413,12 @@ int main(int argc, char** argv) {
   if (argc > 1 && strcmp(argv[1], "memptr") == 0) {
     return run_memptr_test();
   }
+  if (argc > 1 && strcmp(argv[1], "blockxy") == 0) {
+    return run_blockxy_test();
+  }
+  if (argc > 1 && strcmp(argv[1], "ioflags") == 0) {
+    return run_ioflags_test();
+  }
   if (argc > 1 && strcmp(argv[1], "eidelay") == 0) {
     return run_ei_delay_test();
   }
@@ -3286,6 +4439,9 @@ int main(int argc, char** argv) {
   }
   if (argc > 1 && strcmp(argv[1], "qlatch") == 0) {
     return run_qlatch_test();
+  }
+  if (argc > 1 && strcmp(argv[1], "ldairbug") == 0) {
+    return run_ld_a_ir_bug_test();
   }
   if (argc > 1 && strcmp(argv[1], "pushorder") == 0) {
     return run_push_order_test();
@@ -3348,6 +4504,8 @@ int main(int argc, char** argv) {
     r += run_outi_port_test();
     r += run_ini_memptr_test();
     r += run_memptr_test();
+    r += run_blockxy_test();
+    r += run_ioflags_test();
     r += run_ei_delay_test();
     r += run_reti_iff_test();
     r += run_stray_r_test();
@@ -3355,6 +4513,7 @@ int main(int argc, char** argv) {
     r += run_chain_im0_test();
     r += run_prefix_step_test();
     r += run_qlatch_test();
+    r += run_ld_a_ir_bug_test();
     r += run_cyc_source_test();
   }
   return r != 0;
