@@ -10,8 +10,8 @@
 // set bits from that phase up to the next clear one. A mask that never
 // releases WAIT would stop a real processor forever; the core does not model
 // a stuck WAIT line and ignores such a mask instead of stretching without
-// end. Matches the derived-charge rule below, which falls back to the table
-// when no phase is free.
+// end. Matches the derived-charge rule below, which falls back to the
+// timing-table charge when no phase is free.
 static const uint8_t wait_stretch[16][4] = {
 #define WS(m, p) (uint8_t)(((m) & 15) == 15 ? 0 : \
     (((m) >> (p)) & 1) ? ((((m) >> (((p) + 1) & 3)) & 1) ? \
@@ -53,8 +53,8 @@ static unsigned long align_free_slot(unsigned long stamp, unsigned free_phase) {
   return stamp + ((free_phase - stamp) & 3u);
 }
 
-// First slot at or after stamp that the WAIT mask leaves free: the table
-// form of the sample loop above without the counter side effects, so the
+// First slot at or after stamp that the WAIT mask leaves free: the stretch
+// table above, without the counter side effects, so the
 // M1 really samples there even when the mask leaves several phases free.
 // A mask with no clear slot is ignored, like there.
 static unsigned long first_free_slot(unsigned long stamp, unsigned long mask) {
