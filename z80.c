@@ -1247,7 +1247,8 @@ z80_strobe_window_t z80_write_window(const z80* const z) {
 }
 
 // executes the next instruction in memory + handles interrupts
-void z80_step(z80* const z) {
+// Forced inline: the per-step call overhead is measurable on the CPC's 1 us loop.
+__attribute__((always_inline)) inline void z80_step(z80* const z) {
   z->int_accept = Z80_ACCEPT_ALL;
   z->flags_written = 0;
   z->ld_a_ir_late_pv = 0;
