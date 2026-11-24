@@ -3389,6 +3389,62 @@ static int check_wait_mask_no_free_phase(void) {
   return r;
 }
 
+// The WAIT stretch as the old sample loop computed it: the run of set bits
+// from the sample phase up to the next clear one, nothing for a mask with
+// no clear bit. The table in z80.c must agree with this for every input.
+static unsigned wait_stretch_reference(unsigned mask, unsigned long sample) {
+  if ((mask & 0xFu) == 0xFu)
+    return 0;
+  unsigned n = 0;
+  while ((mask >> ((sample + n) & 3u)) & 1u)
+    n++;
+  return n;
+}
+
+// Every mask x sample phase through one unstretched-or-stretched M1 fetch:
+// a NOP step costs 4 T plus the stretch, and both the recorded clear slot
+// and the step's M1 sample slot land on the first clear slot. This pins the
+// table behind both apply_sampled_waits and first_free_slot: any wrong
+// entry moves the T counter or one of the slots off the loop's answer.
+static int check_wait_stretch_table(void) {
+  memset(memory, 0, MEMORY_SIZE);
+  memory[0x0000] = 0x00; // nop
+  int r = 0;
+  for (unsigned mask = 0; mask < 16; mask++) {
+    for (unsigned phase = 0; phase < 4; phase++) {
+      z80 z;
+      z80_init(&z);
+      z.read_byte = rb;
+      z.write_byte = wb;
+      z.port_in = in;
+      z.port_out = out;
+      z.pc = 0;
+      z.periodic_wait_mask = (uint8_t)mask;
+      z.t_counter = (phase + 3) & 3; // sample slot (t_counter + 1) is phase
+      const unsigned long t0 = z.t_counter;
+      const unsigned expected = wait_stretch_reference(mask, t0 + 1);
+      z80_step(&z);
+      if (z.t_counter != t0 + 4 + expected) {
+        printf("*** ERROR wait stretch mask 0x%x phase %u: t %lu (expected %lu)\n",
+            mask, phase, z.t_counter, t0 + 4 + expected);
+        r += 1;
+      }
+      if (z.wait_sample_t != t0 + 1 + expected) {
+        printf("*** ERROR wait stretch mask 0x%x phase %u: sample %lu (expected %lu)\n",
+            mask, phase, z.wait_sample_t, t0 + 1 + expected);
+        r += 1;
+      }
+      if (z.step_m1_sample_tstate != t0 + 1 + expected) {
+        printf("*** ERROR wait stretch mask 0x%x phase %u: m1 slot %lu (expected %lu)\n",
+            mask, phase, z.step_m1_sample_tstate, t0 + 1 + expected);
+        r += 1;
+      }
+    }
+  }
+  printf("*** wait stretch table test: %s\n", r == 0 ? "OK" : "FAILED");
+  return r;
+}
+
 static int run_cyc_source_test(void) {
   memory = malloc(MEMORY_SIZE);
   if (memory == NULL) {
@@ -3428,6 +3484,7 @@ static int run_cyc_source_test(void) {
     }
   }
   r += check_wait_mask_no_free_phase();
+  r += check_wait_stretch_table();
   printf("*** cyc source test: %s\n", r == 0 ? "OK" : "FAILED");
   free(memory);
   return r != 0;

@@ -6,29 +6,35 @@
 // get bit "n" of number "val"
 #define GET_BIT(n, val) (((val) >> (n)) & 1)
 
-// Applies the WAIT mask at one bus cycle's sample T. A set bit holds the
-// cycle one T and the sample repeats, so the cycle stretches out to the
-// next clear slot; internal T never stretches. The sample sits in T2 of an
-// M1 or memory cycle and in the 3rd T of a port cycle (the fetch and memory
-// strobe edges are the Z80_STROBE_WAIT_M1/Z80_STROBE_WAIT_PORT constants
-// in z80.h). Mask 0 skips the loop, so the T counts do not move. A mask
-// with no clear bit is ignored (see apply_sampled_waits).
-// The clear sample slot is recorded for dynamic holds to resume from.
+// T-states a WAIT mask stretches a cycle sampled at each phase: the run of
+// set bits from that phase up to the next clear one. A mask that never
+// releases WAIT would stop a real processor forever; the core does not model
+// a stuck WAIT line and ignores such a mask instead of stretching without
+// end. Matches the derived-charge rule below, which falls back to the table
+// when no phase is free.
+static const uint8_t wait_stretch[16][4] = {
+#define WS(m, p) (uint8_t)(((m) & 15) == 15 ? 0 : \
+    (((m) >> (p)) & 1) ? ((((m) >> (((p) + 1) & 3)) & 1) ? \
+    ((((m) >> (((p) + 2) & 3)) & 1) ? 3 : 2) : 1) : 0)
+#define WR(m) { WS(m, 0), WS(m, 1), WS(m, 2), WS(m, 3) }
+  WR(0), WR(1), WR(2), WR(3), WR(4), WR(5), WR(6), WR(7),
+  WR(8), WR(9), WR(10), WR(11), WR(12), WR(13), WR(14), WR(15)
+#undef WR
+#undef WS
+};
+
+// Applies the WAIT mask at one bus cycle's sample T (table form of the
+// sample loop: the same stretch with no loop). A set bit holds the cycle
+// one T and the sample repeats, so the cycle stretches out to the next
+// clear slot; internal T never stretches. The sample sits in T2 of an M1 or
+// memory cycle and in the 3rd T of a port cycle (the fetch and memory strobe
+// edges are the Z80_STROBE_WAIT_M1/Z80_STROBE_WAIT_PORT constants in z80.h).
+// Mask 0 stretches nothing, so the T counts do not move. The clear sample
+// slot is recorded for dynamic holds to resume from.
 static inline void apply_sampled_waits(z80* const z, unsigned long sample_t) {
-  const unsigned long mask = z->periodic_wait_mask;
-  if ((mask & 0xFu) == 0xFu) {
-    // A mask that never releases WAIT would stop a real processor forever;
-    // the core does not model a stuck WAIT line and ignores such a mask
-    // instead of stretching without end. Matches the derived-charge rule
-    // below, which falls back to the table when no phase is free.
-    z->wait_sample_t = sample_t;
-    return;
-  }
-  while ((mask >> (sample_t & 3u)) & 1u) {
-    z->t_counter++;
-    sample_t++;
-  }
-  z->wait_sample_t = sample_t;
+  const unsigned n = wait_stretch[z->periodic_wait_mask & 0xFu][sample_t & 3u];
+  z->t_counter += n;
+  z->wait_sample_t = sample_t + n;
 }
 
 // The WAIT mask's single free phase (0-3), or 4 when the mask leaves zero
@@ -47,16 +53,12 @@ static unsigned long align_free_slot(unsigned long stamp, unsigned free_phase) {
   return stamp + ((free_phase - stamp) & 3u);
 }
 
-// First slot at or after stamp that the WAIT mask leaves free: the slot
-// loop of apply_sampled_waits above without the counter side effects, so
-// the M1 really samples there even when the mask leaves several phases
-// free. A mask with no clear slot is ignored, like there.
+// First slot at or after stamp that the WAIT mask leaves free: the table
+// form of the sample loop above without the counter side effects, so the
+// M1 really samples there even when the mask leaves several phases free.
+// A mask with no clear slot is ignored, like there.
 static unsigned long first_free_slot(unsigned long stamp, unsigned long mask) {
-  if ((mask & 0xFu) == 0xFu)
-    return stamp;
-  while ((mask >> (stamp & 3u)) & 1u)
-    stamp++;
-  return stamp;
+  return stamp + wait_stretch[mask & 0xFu][stamp & 3u];
 }
 
 // Whether this step derives cyc from the WAIT-sampled slots: the source
@@ -957,7 +959,7 @@ static inline void take_prefix(z80* const z, uint8_t pending) {
   z->int_accept = Z80_ACCEPT_NONE;
 }
 
-static inline void process_interrupts(z80* const z) {
+static void __attribute__((noinline)) acknowledge_interrupts(z80* const z) {
   // An acknowledge is charged like a step, from the slot the next opcode
   // fetch would have sampled to the slot after the acknowledge. The start
   // slot is recorded up front so the end charge below spans the whole
@@ -1147,6 +1149,15 @@ static inline void process_interrupts(z80* const z) {
 
     return;
   }
+}
+
+static inline void process_interrupts(z80* const z) {
+  // Nothing to accept at this boundary: skip the acknowledge set-up.
+  if (z->int_accept == Z80_ACCEPT_NONE ||
+      (!z->nmi_pending &&
+       !(z->int_accept == Z80_ACCEPT_ALL && z->int_pending && z->iff1)))
+    return;
+  acknowledge_interrupts(z);
 }
 
 // MARK: interface
